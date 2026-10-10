@@ -231,11 +231,7 @@ class IndexCleanTests(unittest.TestCase):
         self.assertEqual(out["remapped_id_count"], 0)
         self.assertEqual(_rows_by_id(out["dataframe"]), _rows_by_id(_tree()))
 
-    # Bug: reindex_dataframe_with_map builds a fresh DataFrame from SWC_COLS, so
-    # the parsed header lines (df.attrs) and number tokens are dropped and the
-    # file's own header is replaced by the default one
-    # (core/geometry_editing.py:157-164, written by tools/validation/features/index_clean.py:33-37).
-    @unittest.expectedFailure
+    # Index Clean must keep the file's own header lines.
     def test_index_clean_keeps_header_comments(self) -> None:
         text = "# ORIGINAL_SOURCE lab tracer\n# SCALE 1.0 1.0 1.0\n" + _swc(self.SHUFFLED)
         out = index_clean_text(text).get("bytes").decode("utf-8")
@@ -243,10 +239,7 @@ class IndexCleanTests(unittest.TestCase):
 
 
 class EditTextFidelityTests(unittest.TestCase):
-    # Bug: _df_copy keeps only SWC_COLS, dropping the *_str token columns that
-    # write_swc_to_bytes_preserve_tokens uses, so one edit rewrites the number
-    # text of every row (core/geometry_editing.py:30-31).
-    @unittest.expectedFailure
+    # An edit must not rewrite the number text of rows it did not change.
     def test_move_node_keeps_untouched_number_text(self) -> None:
         rows = [
             "1 1 0.00 0.00 0.00 5.000 -1",

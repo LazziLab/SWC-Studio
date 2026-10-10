@@ -27,8 +27,22 @@ class GeometrySelection:
         return out
 
 
+# swc_io's original number text. Carrying it through an edit lets a save
+# rewrite only the values the edit changed; the header rides in df.attrs.
+_TOKEN_COLS = ["x_str", "y_str", "z_str", "radius_str", "id_str", "parent_str"]
+
+
 def _df_copy(df: pd.DataFrame) -> pd.DataFrame:
-    return df.loc[:, SWC_COLS].copy()
+    cols = SWC_COLS + [c for c in _TOKEN_COLS if c in df.columns]
+    out = df.loc[:, cols].copy()
+    out.attrs = dict(df.attrs)
+    return out
+
+
+def _append_row(df: pd.DataFrame, row: dict[str, Any]) -> pd.DataFrame:
+    out = pd.concat([df, pd.DataFrame([row], columns=SWC_COLS)], ignore_index=True)
+    out.attrs = dict(df.attrs)
+    return out
 
 
 def _id_to_row(df: pd.DataFrame) -> dict[int, int]:
@@ -161,7 +175,9 @@ def reindex_dataframe_with_map(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[int
         parent_id = int(row.get("parent", -1))
         row["parent"] = int(id_map.get(parent_id, -1)) if parent_id >= 0 else -1
         rows.append(row)
-    return pd.DataFrame(rows, columns=SWC_COLS), id_map
+    out = pd.DataFrame(rows, columns=list(work.columns))
+    out.attrs = dict(work.attrs)
+    return out, id_map
 
 
 def subtree_node_ids(df: pd.DataFrame, root_id: int) -> list[int]:
@@ -460,7 +476,7 @@ def delete_node(
     if reconnect_children:
         mask_children = out["id"].astype(int).isin(children)
         out.loc[mask_children, "parent"] = parent_id
-    out = out.loc[out["id"].astype(int) != node_id, SWC_COLS].copy()
+    out = out.loc[out["id"].astype(int) != node_id].copy()
     return (out, {}) if return_id_map else out
 
 
@@ -469,7 +485,7 @@ def delete_subtree(df: pd.DataFrame, root_id: int, *, return_id_map: bool = Fals
     node_ids = set(subtree_node_ids(out, int(root_id)))
     if not node_ids:
         raise ValueError(f"Subtree root {int(root_id)} not found.")
-    out = out.loc[~out["id"].astype(int).isin(node_ids), SWC_COLS].copy()
+    out = out.loc[~out["id"].astype(int).isin(node_ids)].copy()
     return (out, {}) if return_id_map else out
 
 
@@ -503,7 +519,7 @@ def insert_node_before_child(
         "parent": parent_id,
     }
     out.loc[mask, "parent"] = new_id
-    out = pd.concat([out, pd.DataFrame([new_row], columns=SWC_COLS)], ignore_index=True)
+    out = _append_row(out, new_row)
     return out
 
 
@@ -552,7 +568,7 @@ def insert_node_between(
     }
     if end_mask is not None:
         out.loc[end_mask, "parent"] = new_id
-    out = pd.concat([out, pd.DataFrame([new_row], columns=SWC_COLS)], ignore_index=True)
+    out = _append_row(out, new_row)
     return (out, {}) if return_id_map else out
 
 
