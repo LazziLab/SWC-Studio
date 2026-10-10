@@ -16,7 +16,12 @@ import numpy as np
 from neurom.core import Morphology
 
 from swcstudio.core.config import merge_config
-from swcstudio.core.geometry_editing import duplicate_node_ids, format_id_list, parent_cycles
+from swcstudio.core.geometry_editing import (
+    duplicate_node_ids,
+    format_id_list,
+    missing_parent_nodes,
+    parent_cycles,
+)
 from swcstudio.core.validation_catalog import CHECK_ORDER, display_label_for_result
 from swcstudio.core.validation_registry import get_check
 from swcstudio.core.validation_results import CheckResult, PreCheckItem, ValidationReport
@@ -118,7 +123,14 @@ class ValidationContext:
                 f"{'appears' if len(dups) == 1 else 'appear'} on more than one row. "
                 "Give every row its own ID first."
             )
-        cycles = parent_cycles(ids, [int(v) for v in self.parents.tolist()], include_self_loops=True)
+        parents = [int(v) for v in self.parents.tolist()]
+        missing = missing_parent_nodes(ids, parents)
+        if missing:
+            return (
+                f"Missing parent: node(s) {format_id_list(missing)} name a parent ID that is not "
+                "in the file. Reconnect them or restore the missing rows first."
+            )
+        cycles = parent_cycles(ids, parents, include_self_loops=True)
         if cycles:
             on_cycles = sorted({int(v) for cycle in cycles for v in cycle})
             return (

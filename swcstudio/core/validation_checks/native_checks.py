@@ -7,7 +7,12 @@ from typing import Any
 import numpy as np
 
 from swcstudio.core.custom_types import load_custom_type_definitions
-from swcstudio.core.geometry_editing import format_id_list, nodes_cut_off_by_cycles, parent_cycles
+from swcstudio.core.geometry_editing import (
+    format_id_list,
+    missing_parent_nodes,
+    nodes_cut_off_by_cycles,
+    parent_cycles,
+)
 from swcstudio.core.validation_registry import register_check
 from swcstudio.core.validation_results import CheckResult
 
@@ -443,6 +448,38 @@ def _check_no_parent_cycles(ctx, params: dict[str, Any]) -> CheckResult:
     )
 
 
+def _check_no_missing_parents(ctx, params: dict[str, Any]) -> CheckResult:
+    _ = params
+    ids, parents = _original_ids_parents(ctx)
+    id_list = ids.astype(np.int64).tolist()
+    parent_list = parents.astype(np.int64).tolist()
+    bad_ids = missing_parent_nodes(id_list, parent_list)
+    parent_of = dict(zip(id_list, parent_list))
+    missing_parent_ids = sorted({int(parent_of[node_id]) for node_id in bad_ids})
+    passed = len(bad_ids) == 0
+    msg = (
+        "Every parent ID names a node in the file."
+        if passed
+        else (
+            f"Found {len(bad_ids)} node(s) whose parent ID is not in the file: "
+            f"{format_id_list(bad_ids)} (missing parent IDs {format_id_list(missing_parent_ids)})."
+        )
+    )
+    return CheckResult.from_pass_fail(
+        key="no_missing_parents",
+        label="Parent IDs exist",
+        passed=passed,
+        severity="error",
+        message=msg,
+        source="native",
+        failing_node_ids=bad_ids,
+        metrics={
+            "missing_parent_node_count": len(bad_ids),
+            "missing_parent_ids_sample": missing_parent_ids[:50],
+        },
+    )
+
+
 def _check_no_self_loop(ctx, params: dict[str, Any]) -> CheckResult:
     _ = params
     # Soma consolidation re-roots each soma, which would hide a soma that is
@@ -794,6 +831,12 @@ def register_native_checks() -> None:
         label="No parent cycles",
         source="native",
         runner=_check_no_parent_cycles,
+    )
+    register_check(
+        key="no_missing_parents",
+        label="Parent IDs exist",
+        source="native",
+        runner=_check_no_missing_parents,
     )
     register_check(
         key="valid_soma_format",

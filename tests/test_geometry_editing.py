@@ -244,6 +244,15 @@ DUPLICATE_ID_ROWS = TREE_ROWS[:2] + ["2 3 12 3 0 1 1"] + TREE_ROWS[2:]
 CYCLE_ROWS = TREE_ROWS + ["9 3 50 0 0 1 10", "10 3 55 0 0 1 9"]
 
 
+class IndexCleanMissingParentTests(unittest.TestCase):
+    def test_missing_parent_is_refused_not_turned_into_a_root(self) -> None:
+        text = "1 1 0 0 0 5 -1\n2 3 5 0 0 1 1\n3 3 9 0 0 1 77\n"
+        with self.assertRaisesRegex(ValueError, "not in the file"):
+            index_clean_text(text)
+        with self.assertRaises(ValueError):
+            core_geometry.reindex_dataframe_with_map(parse_swc_text_preserve_tokens(text))
+
+
 class IndexCleanRefusalTests(unittest.TestCase):
     """Index Clean renumbers by ID, so it must refuse what it cannot renumber."""
 

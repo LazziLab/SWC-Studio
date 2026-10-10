@@ -202,6 +202,29 @@ def require_unique_node_ids(df: pd.DataFrame, action: str) -> None:
     )
 
 
+def missing_parent_nodes(ids: Iterable[int], parents: Iterable[int]) -> list[int]:
+    """Sorted IDs of nodes whose parent ID (not -1) names no node in the file."""
+    id_list = [int(v) for v in ids]
+    known = set(id_list)
+    return sorted({node_id for node_id, parent in zip(id_list, (int(v) for v in parents))
+                   if parent >= 0 and parent not in known})
+
+
+def require_known_parents(df: pd.DataFrame, action: str) -> None:
+    """Raise ValueError when a parent ID names a node that is not in the file."""
+    if df is None or df.empty:
+        return
+    missing = missing_parent_nodes(df["id"].astype(int).tolist(), df["parent"].astype(int).tolist())
+    if not missing:
+        return
+    noun = "node" if len(missing) == 1 else "nodes"
+    raise ValueError(
+        f"Cannot {action}: {noun} {format_id_list(missing)} name a parent ID that is not in the file, "
+        "so there is no parent to keep them attached to. "
+        "Reconnect them to their real parent (Geometry Editing) or restore the missing rows first."
+    )
+
+
 def require_no_parent_cycles(df: pd.DataFrame, action: str) -> None:
     """Raise ValueError when following parent IDs loops instead of reaching a root."""
     if df is None or df.empty:
@@ -308,13 +331,15 @@ def reindex_dataframe_with_map(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[int
     """Return a reindexed copy and the old->new id mapping.
 
     Raises ValueError, and changes nothing, when a node ID is on more than
-    one row (the rows would collapse into one) or when parent IDs form a
-    cycle (no parent-before-child order exists).
+    one row (the rows would collapse into one), when parent IDs form a
+    cycle (no parent-before-child order exists), or when a parent ID names
+    no node (renumbering would silently make that node a new root).
     """
     if df is None or df.empty:
         return _df_copy(df if df is not None else pd.DataFrame(columns=SWC_COLS)), {}
     require_unique_node_ids(df, "reindex")
     require_no_parent_cycles(df, "reindex")
+    require_known_parents(df, "reindex")
     work = _df_copy(df)
     row_by_id = {
         int(row["id"]): row.to_dict()

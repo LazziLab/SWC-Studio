@@ -20,6 +20,11 @@ CHECK_CATALOG: list[tuple[str, list[tuple[str, str, str]]]] = [
                 "No parent cycles",
                 "Following parent IDs from any node must end at a root (parent -1). Flags nodes on a closed chain of two or more nodes, for example A's parent is B and B's parent is A; those nodes and everything below them are cut off from the cell. A node that is its own parent is reported by No self loops.",
             ),
+            (
+                "no_missing_parents",
+                "Parent IDs exist",
+                "Every parent ID other than -1 must name a node in the file. A parent ID that names no row (often from a truncated file) leaves the node and everything below it unattached, so Index Clean and Split refuse the file until it is reconnected.",
+            ),
         ],
     ),
     (
@@ -194,6 +199,7 @@ CHECK_RULE: dict[str, str] = {}
 CHECK_FAILURE_LABEL: dict[str, str] = {
     "no_duplicate_node_ids": "Duplicate node IDs found",
     "no_parent_cycles": "Parent cycles found",
+    "no_missing_parents": "Missing parent nodes found",
     "valid_soma_format": "Complex soma format found",
     "multiple_somas": "Multiple somas found",
     "has_soma": "Soma missing",

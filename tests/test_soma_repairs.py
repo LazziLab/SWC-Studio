@@ -263,6 +263,11 @@ class SplitTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             split_swc_text(_swc(rows))
 
+    def test_missing_parent_is_refused_instead_of_dropped(self) -> None:
+        rows = list(MULTI_CELL) + [(11, 3, 50, 0, 0, 1, 99)]
+        with self.assertRaisesRegex(ValueError, "node 11"):
+            split_swc_text(_swc(rows))
+
     def test_batch_split_reports_refused_file_and_writes_nothing_for_it(self) -> None:
         import tempfile
         from pathlib import Path

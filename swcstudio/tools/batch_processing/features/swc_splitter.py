@@ -22,7 +22,11 @@ from swcstudio.core.reporting import (
     timestamp_slug,
     write_text_report,
 )
-from swcstudio.core.geometry_editing import require_no_parent_cycles, require_unique_node_ids
+from swcstudio.core.geometry_editing import (
+    require_known_parents,
+    require_no_parent_cycles,
+    require_unique_node_ids,
+)
 from swcstudio.core.swc_io import is_swc_data_file, parse_swc_text_preserve_tokens
 from swcstudio.core.validation import _split_swc_by_soma_roots
 from swcstudio.plugins.registry import register_builtin_method, resolve_method
@@ -65,6 +69,7 @@ def refuse_unsafe_split(swc_text: str) -> int:
     df = parse_swc_text_preserve_tokens(swc_text)
     require_unique_node_ids(df, "split this file")
     require_no_parent_cycles(df, "split this file")
+    require_known_parents(df, "split this file")
     return int(len(df))
 
 

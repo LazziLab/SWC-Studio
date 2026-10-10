@@ -54,14 +54,15 @@ So one SWC can raise:
 
 ## Validation Check Matrix
 
-There are 31 checks: 20 native and 11 wrapped from NeuroM.
+There are 32 checks: 21 native and 11 wrapped from NeuroM.
 
 Most checks read a working copy of the file in which each connected soma
 group is merged into one node, so a complex soma does not trip them. Merging
 removes the merged nodes' IDs and makes each soma a root, so the checks about
 the file's own IDs and parent links (`no_duplicate_node_ids`,
-`no_parent_cycles`, `no_self_loop`, `parent_id_less_than_child_id` and
-`no_node_id_gaps`) read the file as written.
+`no_parent_cycles`, `no_missing_parents`, `no_self_loop`,
+`parent_id_less_than_child_id` and `no_node_id_gaps`) read the file as
+written.
 
 ### File Integrity
 
@@ -71,6 +72,7 @@ These run first, so they report even when `multiple_somas` stops validation.
 |---|---|---|---|---|---|---|---|
 | `no_duplicate_node_ids` | `Duplicate node IDs found` | native | critical | Fails when a node ID is on more than one row, and lists those IDs. A parent ID that names a duplicated ID could mean either row, so the NeuroM checks are blocked, and Index Clean and the geometry edits refuse the file. | none | enabled/severity only | none: renumber or remove the duplicated rows in the file, then reload it |
 | `no_parent_cycles` | `Parent cycles found` | native | critical | Follows parent IDs and fails on nodes whose chain closes on itself (two or more nodes, for example A's parent is B and B's parent is A). Those nodes, and the nodes below them, never reach a root. The NeuroM checks are blocked, and Index Clean refuses the file. A node that is its own parent is left to `no_self_loop`. | none | enabled/severity only | Geometry Editing (disconnect, then reconnect) |
+| `no_missing_parents` | `Missing parent nodes found` | native | critical | Fails on nodes whose parent ID (other than -1) names no row in the file, often from a truncated file, and lists those nodes. They and the nodes below them are unattached. The NeuroM checks are blocked, and Index Clean and Split refuse the file rather than turning such a node into a new root. | none | enabled/severity only | Geometry Editing (reconnect the node to its real parent) |
 
 ### Structural Presence
 

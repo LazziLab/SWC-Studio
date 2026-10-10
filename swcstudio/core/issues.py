@@ -61,6 +61,13 @@ _DUPLICATE_ID_FIX = (
     "they cannot tell which row a parent ID means."
 )
 
+_MISSING_PARENT_FIX = (
+    "These nodes name a parent ID that is not in the file, often because the file was "
+    "truncated or rows were deleted by hand. In Geometry Editing, reconnect each node to its "
+    "real parent, or restore the missing rows in the SWC file. Index Clean and Split refuse "
+    "the file until then."
+)
+
 _PARENT_CYCLE_FIX = (
     "These nodes' parent IDs loop back on themselves (for example A's parent is B and B's "
     "parent is A), so they never reach the soma or another root. In Geometry Editing, "
@@ -102,6 +109,15 @@ def _blocked_reason_from_validation_row(row: dict[str, Any]) -> dict[str, str] |
             "domain": "index",
             "tool_target": "validation",
             "suggested_fix": _DUPLICATE_ID_FIX,
+        }
+    if "missing parent:" in last_line.lower():
+        return {
+            "code": "missing_parents",
+            "title": "Checks blocked by missing parent nodes",
+            "reason": "missing parent nodes",
+            "domain": "geometry",
+            "tool_target": "geometry_editing",
+            "suggested_fix": _MISSING_PARENT_FIX,
         }
     if "parent cycle:" in last_line.lower():
         return {
@@ -214,6 +230,8 @@ def _tool_target_for_key(key: str) -> tuple[str, str, str]:
         return ("index", "validation", _DUPLICATE_ID_FIX)
     if key == "no_parent_cycles":
         return ("geometry", "geometry_editing", _PARENT_CYCLE_FIX)
+    if key == "no_missing_parents":
+        return ("geometry", "geometry_editing", _MISSING_PARENT_FIX)
     if key in radii_keys:
         return ("radii", "manual_radii", "Use Manual Radii Editing to inspect and set individual node radii, or Auto Radii Editing for broader cleanup.")
     if key in label_keys:

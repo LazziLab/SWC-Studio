@@ -30,6 +30,7 @@ from swcstudio.tools.validation.features.run_checks import validate_file
 NATIVE_CHECK_KEYS = {
     "no_duplicate_node_ids",
     "no_parent_cycles",
+    "no_missing_parents",
     "valid_soma_format",
     "multiple_somas",
     "has_soma",
@@ -188,7 +189,7 @@ class _CheckTestCase(unittest.TestCase):
 
 
 class NativeCheckRegistryTests(unittest.TestCase):
-    def test_native_check_set_is_the_documented_twenty(self) -> None:
+    def test_native_check_set_is_the_documented_twenty_one(self) -> None:
         register_native_checks()
         native = {spec.key for spec in list_checks() if spec.source == "native"}
         self.assertEqual(native, NATIVE_CHECK_KEYS)
@@ -444,6 +445,16 @@ class IdIntegrityCheckTests(_CheckTestCase):
 
     def test_no_parent_cycles_passes(self) -> None:
         self._assert_pass("no_parent_cycles", SMALL_CELL)
+
+    def test_no_missing_parents_passes(self) -> None:
+        self._assert_pass("no_missing_parents", SMALL_CELL)
+
+    def test_no_missing_parents_reports_nodes_naming_absent_parents(self) -> None:
+        # Node 6 names parent 40 and node 7 names parent 41; neither exists.
+        rows = list(SMALL_CELL) + ["6 3 40 0 0 1 40", "7 3 41 0 0 1 41"]
+        result = self._assert_fail("no_missing_parents", rows, expected_ids=[6, 7])
+        self.assertEqual(result.status, "fail")
+        self.assertEqual(result.metrics["missing_parent_ids_sample"], [40, 41])
 
     def test_no_parent_cycles_reports_detached_two_node_cycle(self) -> None:
         result = self._assert_fail("no_parent_cycles", TWO_NODE_CYCLE, expected_ids=[6, 7])

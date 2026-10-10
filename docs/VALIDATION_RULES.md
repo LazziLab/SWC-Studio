@@ -24,7 +24,7 @@ Common flow:
 4. return a structured `ValidationReport`
 5. render results in GUI, CLI, or reports
 
-There are 31 checks: 20 native and 11 wrapped from NeuroM.
+There are 32 checks: 21 native and 11 wrapped from NeuroM.
 
 ## What The Checks Read
 
@@ -37,17 +37,17 @@ Most checks read the working copy, so a complex soma is reported once (by
 `valid_soma_format`) and does not trip the other checks. Merging removes the
 merged nodes' IDs and makes each soma a root, so the checks about the file's
 own IDs and parent links read `original_arr`: `no_duplicate_node_ids`,
-`no_parent_cycles`, `no_self_loop`, `parent_id_less_than_child_id` and
-`no_node_id_gaps`.
+`no_parent_cycles`, `no_missing_parents`, `no_self_loop`,
+`parent_id_less_than_child_id` and `no_node_id_gaps`.
 
 The NeuroM checks need a morphology built from the working copy. When it has
-duplicate node IDs or a parent cycle (including a node that is its own
-parent), the morphology is not built, because MorphIO would reject the file
+duplicate node IDs, a parent ID that names no node, or a parent cycle
+(including a node that is its own parent), the morphology is not built, because MorphIO would reject the file
 or drop the nodes on the cycle. Those checks
 then report the reason and are grouped as one blocked-checks issue.
 
-`no_duplicate_node_ids` and `no_parent_cycles` run first, so they report even
-when `multiple_somas` stops validation.
+`no_duplicate_node_ids`, `no_parent_cycles` and `no_missing_parents` run
+first, so they report even when `multiple_somas` stops validation.
 
 ## Main Config
 

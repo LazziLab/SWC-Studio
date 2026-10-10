@@ -8,6 +8,7 @@ from typing import Any
 from swcstudio.core.config import load_feature_config, merge_config
 from swcstudio.core.geometry_editing import (
     reindex_dataframe_with_map,
+    require_known_parents,
     require_no_parent_cycles,
     require_unique_node_ids,
 )
@@ -64,6 +65,7 @@ def refuse_unsafe_index_clean(swc_text: str) -> int:
     df = parse_swc_text_preserve_tokens(swc_text)
     require_unique_node_ids(df, "run Index Clean")
     require_no_parent_cycles(df, "run Index Clean")
+    require_known_parents(df, "run Index Clean")
     return int(len(df))
 
 
