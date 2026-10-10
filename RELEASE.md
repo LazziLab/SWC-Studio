@@ -28,7 +28,7 @@ GitHub Actions will then:
 1. Build and inspect the layer zips, pip wheel, and `update_manifest.json`
 2. Install the wheel into empty environments on Windows, macOS, and
    Linux for Python 3.10, 3.11, and 3.12
-3. Deserialize every production model and run GUI/inference smoke tests
+3. Deserialize each auto-labeler model file and run GUI and auto-labeling smoke tests
 4. Build the modular macOS `.app` and modular Windows `.zip`
 5. Create a **draft** GitHub Release `v0.2.0` and attach all assets
 6. (Gated) Publish the wheel to PyPI
@@ -66,12 +66,12 @@ For a tag `v0.2.0`, the workflow attaches these assets to the release:
 
 | Asset                                  | Audience                          | Size  |
 |----------------------------------------|-----------------------------------|-------|
-| `swcstudio-code-v0.2.0.zip`            | Modular desktop users (code update) | ~5 MB |
-| `swcstudio-models-v0.2.0.zip`          | Modular desktop model updates     | ~75-80 MB raw model files |
+| `swcstudio-code-v0.2.0.zip`            | Modular desktop users (code update; no models) | ~0.5 MB |
+| `swcstudio-models-v0.2.0.zip`          | Modular desktop model updates (the `labeler-<version>/` folder) | ~25 MB (about 50 MB of model files) |
 | `SWC-Studio-v0.2.0-macOS.zip`          | New / runtime-bumping Mac users   | varies by runtime |
 | `SWC-Studio-v0.2.0-Windows.zip`        | New / runtime-bumping Win users   | varies by runtime |
-| `swcstudio-0.2.0-py3-none-any.whl`     | pip users; includes production models | ~38 MB |
-| `swcstudio-0.2.0.tar.gz`               | pip users (sdist fallback); includes models | ~38 MB |
+| `swcstudio-0.2.0-py3-none-any.whl`     | pip users; includes the auto-labeler models | ~26 MB |
+| `swcstudio-0.2.0.tar.gz`               | pip users (sdist fallback); includes the models | ~26 MB |
 | `update_manifest.json`                 | the in-app updater                | ~1 KB |
 
 The `update_manifest.json` is the key file that ties everything

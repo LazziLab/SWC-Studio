@@ -104,10 +104,11 @@ jobs:
           STAGE="staging-models"
           rm -rf "$STAGE"
           mkdir -p "$STAGE"
-          if compgen -G 'swcstudio/data/models/*' > /dev/null; then
-            cp swcstudio/data/models/* "$STAGE/"
+          # One folder per labeler version (labeler-<version>/), kept as a folder.
+          if compgen -G 'swcstudio/data/models/labeler-*' > /dev/null; then
+            cp -R swcstudio/data/models/. "$STAGE/"
           else
-            echo "::error::no model files at swcstudio/data/models/"
+            echo "::error::no labeler model folder at swcstudio/data/models/"
             exit 1
           fi
           echo "$VERSION" > "$STAGE/VERSION"

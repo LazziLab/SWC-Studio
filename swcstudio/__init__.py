@@ -11,13 +11,11 @@ Layers:
 import os as _os
 import sys as _sys
 
-# macOS ships xgboost and torch wheels that both dlopen libomp.dylib; once
-# both are loaded into the same process, concurrent OpenMP regions segfault
-# on arm64 (xgboost 3.2 + torch 2.12 reproduces with any OMP_NUM_THREADS>1).
-# KMP_DUPLICATE_LIB_OK silences the duplicate-load fast-fail; pinning OpenMP
-# to a single thread is what actually keeps auto-label inference alive.
-# setdefault lets power users override either knob; revisit when xgboost or
-# torch ships an arm64 OpenMP fix.
+# Several macOS wheels, xgboost among them, ship their own libomp.dylib; with
+# two copies loaded into one process, concurrent OpenMP regions can segfault on
+# arm64. KMP_DUPLICATE_LIB_OK silences the duplicate-load fast-fail; pinning
+# OpenMP to a single thread keeps auto-label inference alive. setdefault lets
+# power users override either knob.
 if _sys.platform == "darwin":
     _os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     _os.environ.setdefault("OMP_NUM_THREADS", "1")

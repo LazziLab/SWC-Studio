@@ -139,7 +139,7 @@ Closed list. Each op has a typed `params` schema (defined in
 | `set_radius` | yes | yes | node_ids, radius |
 | `manual_radii` | yes | yes | edits[] |
 | `auto_fix` | yes | yes | rule_set, threshold |
-| `auto_label` (AI) | yes | yes | model_sha, model_version, params |
+| `auto_label` (AI) | yes | yes | cell_type, flag_enabled, labeler_version, model_dir, results (stage1_cell_type, class_mismatch, predicted_f1, ...) |
 | `dendrogram_edit` | yes | yes | edit_kind, anchors |
 | `geometry_edit` | yes | yes | op_kind, params |
 | `radii_clean` | yes | yes | params |
@@ -199,11 +199,25 @@ For AI ops the sub-op also carries an `ai_run_ref` blob hash:
 ```json
 {
   "kind": "auto_label",
-  "params": {"cell_type": "unknown", "flag_strictness": 0.5},
+  "params": {"cell_type": "auto", "flag_enabled": true, "labeler_version": "1.0.0",
+             "cell_type_result": "pyramidal", "stage1_cell_type": "pyramidal",
+             "class_mismatch": false, "predicted_f1": 0.937},
   "summary": {"nodes_modified": 1283},
   "ai_run_ref": "sha256:..."
 }
 ```
+
+For `auto_label`, `params` records the settings and the labeler
+version (`labeler_version`). The settings are the cell class as chosen
+(`cell_type`: `auto`, or the labeler's name `pyramidal` /
+`interneuron`), `flag_enabled`, `flag_budget` for batch runs, and the
+model folder named for the run, if any (`model_dir`). `params` also
+records the result: the class used (`cell_type_result`), whether the
+user or Stage 1 chose it (`cell_type_source`), Stage 1's prediction
+(`stage1_cell_type`, `stage1_confidence`), `class_mismatch`,
+`predicted_f1`, and node and type counts. The exact set of keys, and
+whether the settings sit inside an `options` dict, depends on the entry
+point (CLI, GUI, or batch).
 
 ### Diff blob (referenced by `diff_ref`)
 
@@ -237,17 +251,17 @@ MLflow-compatible field names. Stored in `objects/<sha>.zst`.
   "started_at": "2024-01-01T11:45:00Z",
   "finished_at": "2024-01-01T11:45:22Z",
   "status": "FINISHED",
-  "params":  {"cell_type": "unknown", "flag_strictness": 0.5},
-  "metrics": {"nodes_labeled": 1283, "low_conf_count": 17},
-  "artifacts": [
-    {"name": "swcstudio-models-v0.2.0.zip", "sha256": "..."},
-    {"name": "input.swc", "sha256": "..."},
-    {"name": "output.swc", "sha256": "..."}
-  ],
+  "params":  {"cell_type": "auto", "flag_enabled": true, "labeler_version": "1.0.0", "...": "..."},
+  "metrics": {},
+  "artifacts": [],
   "source_version": {"tool": "swcstudio", "version": "0.2.0", "git_sha": "a1b2c3d"},
-  "env_hash": "sha256:..."
+  "env_hash": "..."
 }
 ```
+
+`auto_label` runs keep their settings and results in `params`, the same
+dict as the sub-op's `params`. They leave `metrics` and `artifacts`
+empty. The labeler version is recorded as `params.labeler_version`.
 
 ### Env fingerprint blob (referenced by `env_hash`)
 
@@ -263,7 +277,7 @@ Stored once per unique environment, deduplicated.
   },
   "packages": {
     "numpy": "1.26.4", "scipy": "1.13.0", "scikit-learn": "1.5.2",
-    "torch": "2.3.1", "torch-geometric": "2.6.1",
+    "xgboost": "3.2.0",
     "swcstudio": "0.2.0"
     /* full importlib.metadata snapshot */
   }
@@ -344,7 +358,7 @@ from swcstudio.core.provenance import tracked_op, OpKind
 with tracked_op(
     dataset_path="/path/to/neuron_001.swc",
     kind=OpKind.AUTO_LABEL,
-    params={"cell_type": "unknown", "flag_strictness": 0.5},
+    params={"cell_type": "auto", "flag_enabled": True, "labeler_version": "1.0.0"},
     message="Auto-label apical/basal",
     is_ai=True,
 ) as op:
@@ -482,6 +496,11 @@ CREATE TABLE refs (
 );
 ```
 
+`ai_runs.model_sha` and `ai_runs.model_version` are filled only when an
+AI op's params carry `model_sha` or `model_version`. `auto_label` runs
+do not; they record the labeler version as `labeler_version` inside
+`params_json`.
+
 The project-level `.swcstudio/index.sqlite` has the same schema plus
 a `dataset` column on `commits`, `ops`, `ai_runs` keyed by the
 per-file `root_sha`.
@@ -491,26 +510,28 @@ files. `swcstudio history reindex` does this.
 
 ## 12. Reproduction (`reproduce.yaml`)
 
-For any AI op, `swcstudio history reproduce <sha>` emits a small
-`reproduce.yaml`:
+For any AI op, `swcstudio history reproduce <file> <op-id|sha>` emits a
+small `reproduce.yaml`:
 
 ```yaml
 schema_version: 1
 op:        auto_label
-input:     {sha256: ..., path: "neuron_001.swc"}
+input:     {sha256: ..., path: 'neuron_001.swc'}
 output:    {sha256: ...}
-params:    {cell_type: unknown, flag_strictness: 0.5}
-model:     {sha256: ..., url: "https://github.com/Mio0v0/SWC-Studio/releases/download/v0.2.0/swcstudio-models-v0.2.0.zip"}
-env_hash:  sha256:...
-command:   "swcstudio auto-label input.swc --cell-type unknown --flag-strictness 0.5"
+params:    {"cell_type": "pyramidal", "class_mismatch": false, "flag_enabled": true, "labeler_version": "1.0.0", ...}
+env_hash:  ...
+command:   'swcstudio auto-label --cell-class 3-class neuron_001.swc'
 ```
 
-A colleague with `swcstudio reproduce reproduce.yaml`:
+`params` is the op's recorded params dict. `command` repeats the
+options recorded at the top level of `params`, as the CLI records them:
+`--cell-class` when a cell class was chosen, `--no-flag` when the
+quality flag was off, and `--model-dir` when a model folder was named.
 
-1. Verifies their env matches `env_hash`; warns on mismatch.
-2. Downloads the referenced model if not cached.
-3. Runs the command on a file matching `input.sha256`.
-4. Compares produced output to `output.sha256`.
+To reproduce the result, a colleague runs `command` on a file whose
+hash matches `input.sha256`, with the labeler version in
+`params.labeler_version` and an environment matching `env_hash`, and
+compares the result with `output.sha256`.
 
 ## 13. CLI surface (v1)
 

@@ -17,8 +17,8 @@ Getting Started <../GETTING_STARTED>
 - **`pip install swcstudio`** from PyPI (Python users)
 - **source install** from the cloned repository (developers)
 
-The bundled desktop app is the portable CPU distribution. For GPU setup
-with pip/source installs, see <a href="../GPU_INSTALL.html">GPU Setup</a>.
+All three install paths include the auto-labeler's model files.
+Auto-labeling runs on the CPU and needs no GPU.
 
 ## First Run
 
@@ -26,8 +26,8 @@ with pip/source installs, see <a href="../GPU_INSTALL.html">GPU Setup</a>.
 - if using a pip install, run `swcstudio doctor`, then `swcstudio-gui`
   to launch the GUI or `swcstudio --help` for the CLI
 - if using a source install, run the same commands inside your activated venv to verify
-- run `swcstudio gpu-status` or use Help -> GPU Readiness when you want
-  to check CUDA/PyTorch availability
+- run `swcstudio models status` to check that the auto-labeler's model
+  files are found
 
 ## Updating
 

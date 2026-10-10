@@ -1033,9 +1033,19 @@ def _format_reproduce_yaml(ev, ai_blob: dict, source_path: Path) -> str:
     if artifacts.get("model.pkl"):
         lines.append(f"model:     {{sha256: {artifacts['model.pkl']}}}")
     lines.append(f"env_hash:  {ai_blob.get('env_hash', 'null')}")
-    arg_pieces = [f"swcstudio auto-label"]
-    for k, v in sorted(params.items()):
-        arg_pieces.append(f"--{k.replace('_','-')} {v}")
+    # Only the recorded settings that are command-line options; the rest of
+    # ``params`` describes the result. The GUI records its settings under
+    # ``options``, the command line at the top level.
+    settings = dict(params.get("options") or {})
+    settings.update({k: params[k] for k in ("cell_type", "flag_enabled", "model_dir") if k in params})
+    arg_pieces = ["swcstudio auto-label"]
+    cell = str(settings.get("cell_type") or "auto")
+    if cell not in ("auto", "unknown", "None"):
+        arg_pieces.append("--cell-class " + {"pyramidal": "3-class", "interneuron": "2-class"}.get(cell, cell))
+    if settings.get("flag_enabled") is False:
+        arg_pieces.append("--no-flag")
+    if settings.get("model_dir"):
+        arg_pieces.append(f"--model-dir {settings['model_dir']}")
     arg_pieces.append(source_path.name)
     lines.append(f"command:   {' '.join(arg_pieces)!r}")
     return "\n".join(lines) + "\n"

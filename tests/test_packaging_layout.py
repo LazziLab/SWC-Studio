@@ -43,7 +43,8 @@ class PackagingLayoutTests(unittest.TestCase):
             configs.mkdir(parents=True)
             runtime.mkdir()
             (package / "__init__.py").write_text("", encoding="utf-8")
-            (models / "qc_gate.pkl").write_bytes(b"model")
+            (models / "labeler-1.0.0").mkdir()
+            (models / "labeler-1.0.0" / "flag_model.joblib").write_bytes(b"model")
             (configs / "default.json").write_text("{}", encoding="utf-8")
 
             staging.stage_payload(source, runtime, "1.2.3")
@@ -52,10 +53,10 @@ class PackagingLayoutTests(unittest.TestCase):
                 (runtime / "app/swcstudio/tools/validation/configs/default.json").is_file()
             )
             self.assertFalse(
-                (runtime / "app/swcstudio/data/models/qc_gate.pkl").exists()
+                (runtime / "app/swcstudio/data/models/labeler-1.0.0/flag_model.joblib").exists()
             )
             self.assertEqual(
-                (runtime / "models/qc_gate.pkl").read_bytes(),
+                (runtime / "models/labeler-1.0.0/flag_model.joblib").read_bytes(),
                 b"model",
             )
             self.assertEqual(
@@ -148,19 +149,21 @@ class PackagingLayoutTests(unittest.TestCase):
 
     def test_model_search_uses_bootstrap_model_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            bundled = Path(tmp)
-            model = bundled / "bootstrap_test_model.bin"
-            model.write_bytes(b"model")
+            bundled = Path(tmp) / "bundled"
+            folder = bundled / model_paths.labeler_models_dirname()
+            folder.mkdir(parents=True)
+            for fname in model_paths.MODEL_FILES.values():
+                (folder / fname).write_bytes(b"model")
+            user = Path(tmp) / "user"
+            user.mkdir()
             with mock.patch.dict(
                 os.environ,
                 {model_paths.BUNDLED_ENV_VAR: str(bundled)},
                 clear=False,
-            ):
-                found = model_paths.resolve_model_path(
-                    "bootstrap_test_model.bin",
-                    auto_download=False,
-                )
-            self.assertEqual(found, model)
+            ), mock.patch.object(model_paths, "user_model_dir", return_value=user):
+                os.environ.pop(model_paths.ENV_VAR, None)
+                found = model_paths.resolve_model_dir(auto_download=False)
+            self.assertEqual(found, folder)
 
     def test_app_updates_are_only_offered_to_modular_bundles(self) -> None:
         manifest = updater.UpdateManifest(

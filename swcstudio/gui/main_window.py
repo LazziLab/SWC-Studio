@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 
 from .auto_typing_guide import AutoTypingGuideWidget
 from .auto_typing_workers import _AutoLabelFileWorker, _TypeSuspicionWorker
+from .flag_review_window import FlagReviewPanel
 from .batch_tab import BatchTabWidget
 from .constants import SWC_COLS, label_for_type
 from .context_inspector import ContextInspectorWidget
@@ -586,6 +587,26 @@ class SWCMainWindow(QMainWindow):
         self.addDockWidget(Qt.TopDockWidgetArea, self._auto_guide_dock)
         self._auto_guide_dock.hide()
 
+        # Flag Review: a batch's labeled cells ranked for curator review.
+        self._flag_review_panel = FlagReviewPanel(self)
+        self._flag_review_dock = QDockWidget("Flag Review", self)
+        self._flag_review_dock.setObjectName("FlagReviewDock")
+        self._flag_review_dock.setFeatures(
+            QDockWidget.DockWidgetMovable
+            | QDockWidget.DockWidgetFloatable
+            | QDockWidget.DockWidgetClosable
+        )
+        self._flag_review_dock.setAllowedAreas(
+            Qt.TopDockWidgetArea | Qt.BottomDockWidgetArea | Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
+        )
+        self._flag_review_dock.setWidget(self._flag_review_panel)
+        self._make_panel_freely_resizable(self._flag_review_dock)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self._flag_review_dock)
+        self._flag_review_dock.hide()
+        self._flag_review_panel.open_file_requested.connect(self._load_swc)
+        self._flag_review_panel.log_message.connect(lambda msg: self._append_log(msg, "FLAG"))
+        self._batch_tab.flag_review_requested.connect(self._open_flag_review)
+
         self._batch_tab.log_message.connect(lambda msg: self._append_log(msg, "BATCH"))
 
         # ---------------- Bottom edit log ----------------
@@ -845,6 +866,12 @@ class SWCMainWindow(QMainWindow):
         )
         window_menu.addAction(show_auto_guide_action)
 
+        show_flag_review_action = QAction("Show/Hide Flag Review", self)
+        show_flag_review_action.triggered.connect(
+            lambda: self._flag_review_dock.setVisible(not self._flag_review_dock.isVisible())
+        )
+        window_menu.addAction(show_flag_review_action)
+
         # History (provenance) - see PROVENANCE_SPEC.md for the full surface.
         history_menu = menu.addMenu("History")
         open_history_action = QAction("Open History Browser…", self)
@@ -863,9 +890,6 @@ class SWCMainWindow(QMainWindow):
         short_action = QAction("Shortcuts", self)
         short_action.triggered.connect(self._show_shortcuts)
         help_menu.addAction(short_action)
-        gpu_action = QAction("GPU Readiness...", self)
-        gpu_action.triggered.connect(self._show_gpu_readiness_dialog)
-        help_menu.addAction(gpu_action)
         help_menu.addSeparator()
         update_action = QAction("Check for Updates...", self)
         update_action.triggered.connect(self._check_for_updates)
@@ -2139,7 +2163,7 @@ class SWCMainWindow(QMainWindow):
         config_overrides: dict = {}
         if backend_cfg.get("model_dir"):
             config_overrides["model_dir"] = str(backend_cfg["model_dir"])
-        for key in ("cell_type", "flag_enabled", "flag_strictness", "flag_feature_mode"):
+        for key in ("cell_type", "flag_enabled"):
             if key in backend_cfg:
                 config_overrides[key] = backend_cfg[key]
 
@@ -2261,10 +2285,8 @@ class SWCMainWindow(QMainWindow):
             "apic": bool(getattr(opts, "apic", False)),
             "basal": bool(getattr(opts, "basal", False)),
             "rad": bool(getattr(opts, "rad", False)),
-            "cell_type": str(getattr(opts, "cell_type", "unknown") or "unknown"),
+            "cell_type": str(getattr(opts, "cell_type", "auto") or "auto"),
             "flag_enabled": bool(getattr(opts, "flag_enabled", True)),
-            "flag_strictness": float(getattr(opts, "flag_strictness", 0.5)),
-            "flag_feature_mode": str(getattr(opts, "flag_feature_mode", "compact") or "compact"),
         }
         result_payload = {
             "input_file": str(source_doc.file_path or source_doc.filename),
@@ -2274,7 +2296,11 @@ class SWCMainWindow(QMainWindow):
             "out_type_counts": dict(getattr(result_obj, "out_type_counts", {}) or {}),
             "cell_type": getattr(result_obj, "cell_type", None),
             "cell_type_source": getattr(result_obj, "cell_type_source", "stage1"),
+            "stage1_cell_type": getattr(result_obj, "stage1_cell_type", None),
             "stage1_confidence": getattr(result_obj, "stage1_confidence", None),
+            "class_mismatch": bool(getattr(result_obj, "class_mismatch", False)),
+            "notes": list(getattr(result_obj, "notes", []) or []),
+            "labeler_version": getattr(result_obj, "labeler_version", None),
             "qc_result": dict(getattr(result_obj, "qc_result", {}) or {}),
             "flag_result": dict(getattr(result_obj, "flag_result", {}) or {}),
             "change_details": [
@@ -2291,17 +2317,25 @@ class SWCMainWindow(QMainWindow):
         source_doc.last_auto_label_result = dict(result_payload)
 
         out_counts = dict(result_payload.get("out_type_counts", {}))
+        flag_result = dict(result_payload.get("flag_result", {}) or {})
+        from swcstudio.core.auto_typing import cell_class_name  # noqa: PLC0415
         event_details = [
             f"Input: {source_doc.file_path or source_doc.filename}",
             f"Nodes: {int(result_payload.get('nodes_total', 0))}",
             f"Type changes: {int(result_payload.get('type_changes', 0))}",
-            f"Cell type: {result_payload.get('cell_type') or 'unknown'} ({result_payload.get('cell_type_source') or 'stage1'})",
-            f"Flagged: {bool(dict(result_payload.get('flag_result', {}) or {}).get('flagged', False))}",
+            (f"Cell class: {cell_class_name(result_payload.get('cell_type'))} "
+             f"({'chosen' if result_payload.get('cell_type_source') == 'user' else 'Stage 1'})"),
+            f"Flagged: {bool(flag_result.get('flagged', False))}"
+            + (f" (predicted per-cell F1 {float(flag_result['predicted_f1']):.3f})"
+               if flag_result.get("predicted_f1") is not None else ""),
             (
                 "Out types (1/2/3/4): "
                 f"{out_counts.get(1, 0)}/{out_counts.get(2, 0)}/{out_counts.get(3, 0)}/{out_counts.get(4, 0)}"
             ),
         ]
+        if result_payload.get("class_mismatch"):
+            event_details.append(
+                f"Class mismatch: Stage 1 predicts {cell_class_name(result_payload.get('stage1_cell_type'))}")
         # Provenance: this is an AI op. tracked_op auto-detects
         # OpKind.AUTO_LABEL as AI, captures the full env fingerprint
         # (every installed package + system info), records an
@@ -2313,10 +2347,17 @@ class SWCMainWindow(QMainWindow):
             preview_df,
             kind=OpKind.AUTO_LABEL,
             params={
-                "options":         opts_dict,
-                "nodes_total":     int(result_payload.get("nodes_total", 0)),
-                "type_changes":    int(result_payload.get("type_changes", 0)),
-                "out_type_counts": {str(k): int(v) for k, v in out_counts.items()},
+                "options":          opts_dict,
+                "labeler_version":  result_payload.get("labeler_version"),
+                "nodes_total":      int(result_payload.get("nodes_total", 0)),
+                "type_changes":     int(result_payload.get("type_changes", 0)),
+                "out_type_counts":  {str(k): int(v) for k, v in out_counts.items()},
+                "cell_type_result": result_payload.get("cell_type"),
+                "cell_type_source": result_payload.get("cell_type_source"),
+                "stage1_cell_type": result_payload.get("stage1_cell_type"),
+                "class_mismatch":   bool(result_payload.get("class_mismatch", False)),
+                "flagged":          bool(flag_result.get("flagged", False)),
+                "predicted_f1":     flag_result.get("predicted_f1"),
             },
             message=(
                 f"GUI auto-label: {int(result_payload.get('type_changes', 0))} "
@@ -2363,8 +2404,8 @@ class SWCMainWindow(QMainWindow):
             f"nodes={int(result.get('nodes_total', 0))}, "
             f"type_changes={int(result.get('type_changes', 0))}, "
             f"radius_changes={int(result.get('radius_changes', 0))}, "
-            f"cell_type={result.get('cell_type') or 'unknown'} "
-            f"({result.get('cell_type_source') or 'stage1'}), "
+            f"cell_class={result.get('cell_type') or 'auto'} "
+            f"({'user' if result.get('cell_type_source') == 'user' else 'auto'}), "
             f"flag={bool(dict(result.get('flag_result', {}) or {}).get('flagged', False))}, "
             f"out_types(soma/axon/basal/apic)="
             f"{out_counts.get(1, 0)}/{out_counts.get(2, 0)}/{out_counts.get(3, 0)}/{out_counts.get(4, 0)}"
@@ -3504,11 +3545,19 @@ class SWCMainWindow(QMainWindow):
             act.triggered.connect(lambda _=False, sp=p: self._load_swc(sp))
             self._recent_menu.addAction(act)
 
+    def _open_flag_review(self, path: str) -> None:
+        """Load a batch's flag review into the Flag Review window and show it."""
+        if path and not self._flag_review_panel.load(path):
+            return
+        self._flag_review_dock.show()
+        self._flag_review_dock.raise_()
+
     def _reset_layout(self):
         self._data_dock.show()
         self._control_dock.show()
         self._precheck_dock.hide()
         self._auto_guide_dock.hide()
+        self._flag_review_dock.hide()
         try:
             self.setDockOptions(QMainWindow.AnimatedDocks | QMainWindow.AllowNestedDocks | QMainWindow.AllowTabbedDocks)
             self.addDockWidget(Qt.LeftDockWidgetArea, self._data_dock)
@@ -3641,7 +3690,7 @@ class SWCMainWindow(QMainWindow):
 
     # ------------------------------------------------------------------
     # Background type-suspicion worker. The QThread waits on a separate
-    # inference process rather than loading XGBoost/PyTorch into Qt's
+    # inference process rather than loading XGBoost into Qt's
     # process. This avoids macOS crashes caused by incompatible OpenMP
     # runtimes shipped by native scientific wheels.
     # ------------------------------------------------------------------
@@ -4954,6 +5003,12 @@ class SWCMainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             versions = {"app": "unknown", "models": "unknown"}
         install_flavor = "bundled executable" if getattr(sys, "frozen", False) else "pip/source environment"
+        try:
+            from swcstudio.core.model_paths import labeler_info
+            labeler = labeler_info()
+            labeler_text = f"SWC auto-labeler {labeler['version']} ({labeler['source_commit'][:10]})"
+        except Exception:  # noqa: BLE001
+            labeler_text = "unknown"
         text = (
             "SWC-Studio is an issue-driven workspace for inspecting, repairing, "
             "and exporting neuron morphology files in SWC format.\n\n"
@@ -4961,23 +5016,11 @@ class SWCMainWindow(QMainWindow):
             "same validation and editing logic can be used interactively or in scripts.\n\n"
             f"App code version: {versions.get('app', 'unknown')}\n"
             f"Models version: {versions.get('models', 'unknown')}\n"
-            f"Install flavor: {install_flavor}\n"
-            "Use Help -> GPU Readiness to check whether this environment can run GPU mode."
+            f"Auto-labeler: {labeler_text}\n"
+            f"Install flavor: {install_flavor}"
         )
         self._show_help_text_dialog("About SWC-Studio", text)
         self._append_log("Opened About dialog.", "INFO")
-
-    def _show_gpu_readiness_dialog(self):
-        try:
-            from swcstudio.core.gpu_status import format_gpu_readiness
-            text = format_gpu_readiness()
-        except Exception as e:  # noqa: BLE001
-            text = (
-                "Could not run the GPU readiness checker.\n\n"
-                f"{e.__class__.__name__}: {e}"
-            )
-        self._show_help_text_dialog("GPU Readiness", text)
-        self._append_log("Opened GPU readiness checker.", "INFO")
 
     # ----- History menu handlers (PROVENANCE_SPEC §14) -----
     def _on_open_history_browser(self):

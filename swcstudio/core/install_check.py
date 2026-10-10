@@ -24,8 +24,6 @@ RUNTIME_DEPENDENCIES: tuple[tuple[str, str], ...] = (
     ("scikit-learn", "sklearn"),
     ("joblib", "joblib"),
     ("xgboost", "xgboost"),
-    ("torch", "torch"),
-    ("torch-geometric", "torch_geometric"),
     ("PySide6", "PySide6"),
     ("pyqtgraph", "pyqtgraph"),
     ("vispy", "vispy"),
@@ -71,39 +69,19 @@ def _dependency_report(distribution: str, module: str) -> dict[str, Any]:
 
 
 def _load_model(short_name: str, path: Path) -> None:
-    if short_name == "stage1":
-        from swcstudio.core.auto_typing.cell_type_detector import CellTypeClassifier
+    """Deserialize one labeler model file the way the labeler reads it."""
+    from swcstudio.core.auto_typing._pickle_compat import labeler_pickle_aliases
 
-        CellTypeClassifier.load(path)
-        return
-    if short_name == "stage2":
-        from swcstudio.core.auto_typing.pipeline import _load_stage2_bundle
+    with labeler_pickle_aliases():
+        if path.suffix == ".pkl":
+            import pickle
 
-        _load_stage2_bundle(path)
-        return
-    if short_name == "gnn":
-        import torch
+            with path.open("rb") as fh:
+                pickle.load(fh)
+        else:
+            import joblib
 
-        from swcstudio.core.auto_typing.gnn_inference import load_gnn
-
-        load_gnn(path, device=torch.device("cpu"))
-        return
-    if short_name == "branch3":
-        import torch
-
-        from swcstudio.core.auto_typing.gnn_branch3_inference import load_branch3
-
-        load_branch3(path, device=torch.device("cpu"))
-        return
-    if short_name == "qc_gate":
-        from swcstudio.core.auto_typing.qc_input import QCGate
-
-        QCGate.load(path)
-        return
-
-    import joblib
-
-    joblib.load(path)
+            joblib.load(path)
 
 
 def _check_qapplication() -> dict[str, Any]:

@@ -17,6 +17,7 @@ The GUI uses a studio-style layout with shared backend logic:
   - issue details and active tool controls
 - bottom area
   - transient status and event output
+  - the `Flag Review` dock, when shown (`Window -> Show/Hide Flag Review`)
 
 The center workspace stays focused on the active document. The side panels change as the selected issue or active tool changes.
 
@@ -101,6 +102,39 @@ Typical routing behavior:
   - `Geometry Editing`
 
 Some checks use popup-only actions. For example, if a file contains custom type IDs that are not yet defined, the GUI can open the custom type definition dialog rather than only switching tabs.
+
+The `Likely wrong labels` issue compares the file's current labels with
+the labels the SWC auto-labeler gives. It compares labels only and does
+not score the quality flag. Its action opens `Auto Label Editing`.
+
+## Auto-labeling and flag review
+
+Auto-labeling uses the SWC auto-labeler, version 1.0.0.
+
+- `Morphology Editing -> Auto Label Editing` labels the current canvas.
+  Choose the cell class (`Auto (Stage 1 decides)`,
+  `3-class (axon, basal, apical)` or `2-class (axon, dendrite)`), turn
+  the `Quality flag` on or off, and optionally pick a model folder.
+  `Run` applies the labels and records them in the file's history. The
+  result shows the cell class, the predicted per-cell F1, the flag state
+  and its reason, and a warning when your chosen class differs from
+  Stage 1's prediction.
+- `Batch Processing -> Auto Label Editing` labels every SWC file in a
+  folder in place, each with its own history. It flags the riskiest
+  share of each cell class (`Flag the riskiest [N %] of each cell
+  class`, 10% by default).
+- When a batch with the quality flag on finishes, the `Flag Review`
+  window opens as a dock at the bottom of the main window. It lists
+  every file, riskiest first. Open a cell from it, check its labels,
+  and mark it `OK` or `Corrected`. The marks are saved into the review
+  file, so a review can be resumed. `Window -> Show/Hide Flag Review`
+  shows or hides the window.
+- `Window -> Show/Hide Auto Typing Guide` shows a short description of
+  the labeling stages.
+- `Help -> About` shows the app, models, and auto-labeler versions.
+
+See [Reviewing Flagged Cells](documentation/auto-typing-backends.md#reviewing-flagged-cells)
+for the full review workflow.
 
 ## Custom types in the GUI
 

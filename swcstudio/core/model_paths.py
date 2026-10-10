@@ -1,70 +1,78 @@
-"""Resolve where the auto-typing models live on disk.
+"""Resolve where the auto-labeler's model files live on disk.
 
-The auto-typing engine (:mod:`swcstudio.core.auto_typing`) is the v12
-QC-label-flag path. Its required core model files are:
+SWC-Studio labels with the SWC auto-labeler (:mod:`swcstudio.core.labeler`).
+Its model set is four files that always travel together in one folder:
 
-* ``cell_type_classifier.pkl`` — Stage 1 (whole-cell pyramidal vs interneuron)
-* ``branch_classifier.pkl`` — Stage 2 (per-branch / per-subtree multiclass)
-* ``gnn_apical_basal.pt`` — Stage 2b GraphSAGE GNN
-* ``gnn_branch3_rescue.pt`` — conservative Branch3 rescue head
-* ``qc_gate.pkl`` — runtime QC gate
+* ``cell_type_classifier.pkl`` -- Stage 1, which cell class a file is
+  (3-class: axon, basal and apical; 2-class: axon and dendrite)
+* ``branch_classifier.pkl`` -- Stage 2, the subtree classifier
+* ``branch_correction.joblib`` -- Stage 3, the proximal branch correction
+* ``flag_model.joblib`` -- Stage 4, one quality flag per cell class
 
-Optional learned flag models add per-cell bad-label flag scoring:
+The first three are required. The flag is optional: a model set without it
+labels cells but scores no flag. Files are never mixed across folders, because
+each model in a set was trained against the others.
 
-* ``flag_model_pyramidal.joblib``
-* ``flag_model_interneuron.joblib``
-* ``flag_model_all.joblib``
+A model folder is either named for the labeler version (``labeler-<version>``,
+the way SWC-Studio ships and updates its models) inside one of the search
+directories, or is a search directory itself, such as a model set you trained.
 
-Search order (first existing wins):
+A folder you name (``--model-dir``, the GUI selector, or the
+``SWCSTUDIO_MODEL_DIR`` environment variable, in that order of precedence) is
+the only one searched: if it is incomplete, auto-labeling reports what is missing
+rather than quietly using other models. Otherwise the search order is (the first
+complete folder wins):
 
-1. The directory passed in via the function argument or via the
-   ``SWCSTUDIO_MODEL_DIR`` environment variable (highest precedence,
-   used for "I trained my own models" workflows).
-2. The user data directory:
+1. The user data directory, where model updates are installed:
 
    * Windows: ``%APPDATA%\\swcstudio\\models``
    * macOS: ``~/Library/Application Support/swcstudio/models``
    * Linux: ``~/.local/share/swcstudio/models``
 
-3. The modular desktop runtime model directory supplied by the
-   bootstrap.
-4. The bundled directory inside the installed package
-   (``swcstudio/data/models``). Source installs keep the current model
-   files here; published wheels include the same production models.
+2. The desktop runtime's model directory, supplied by the bootstrap through
+   ``SWCSTUDIO_BUNDLED_MODEL_DIR``.
+3. The directory inside the installed package (``swcstudio/data/models``).
 
 Public API:
 
-* ``user_model_dir()`` — user data dir (creates if missing)
-* ``bundled_model_dir()`` — dir inside the installed package
-* ``resolve_model_path(name, override=None)`` — full path or ``None``
-* ``available_models(override=None)`` — ``dict[name -> Path | None]``
-
-Calling code never hard-codes paths. It calls
-``resolve_model_path("gnn_apical_basal.pt")`` and gets either a real
-path or ``None``.
+* ``labeler_info()`` -- version, source commit and model checksums of the labeler
+* ``resolve_model_dir(override=None)`` -- the model folder, or ``None``
+* ``resolve_model_path(name, override=None)`` -- one file of that folder, or ``None``
+* ``available_models(override=None)`` -- ``dict[name -> Path | None]``
+* ``diagnostic_search_report(override=None)`` -- where the resolver looked
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
+from functools import lru_cache
 from pathlib import Path
-from typing import Iterable
+from typing import Any
 
-# Standard model file names. Custom-trained models keep these names so
-# they are picked up automatically.
+# The labeler's model files, by short name.
 MODEL_FILES = {
     "stage1": "cell_type_classifier.pkl",
     "stage2": "branch_classifier.pkl",
-    "gnn":    "gnn_apical_basal.pt",
-    "branch3": "gnn_branch3_rescue.pt",
-    "qc_gate": "qc_gate.pkl",
-    "flag_pyramidal": "flag_model_pyramidal.joblib",
-    "flag_interneuron": "flag_model_interneuron.joblib",
-    "flag_all": "flag_model_all.joblib",
+    "correction": "branch_correction.joblib",
+    "flag": "flag_model.joblib",
 }
+REQUIRED_MODELS = ("stage1", "stage2", "correction")
 
 ENV_VAR = "SWCSTUDIO_MODEL_DIR"
 BUNDLED_ENV_VAR = "SWCSTUDIO_BUNDLED_MODEL_DIR"
+
+
+@lru_cache(maxsize=1)
+def labeler_info() -> dict[str, Any]:
+    """The labeler SWC-Studio runs: ``LABELER.json`` written by ``scripts/sync_labeler.py``."""
+    path = Path(__file__).resolve().parent / "labeler" / "LABELER.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def labeler_models_dirname() -> str:
+    """Folder name of the shipped model set, e.g. ``labeler-1.0.0``."""
+    return str(labeler_info()["models_dir"])
 
 
 def _user_data_root() -> Path:
@@ -76,7 +84,6 @@ def _user_data_root() -> Path:
         return Path.home() / "AppData" / "Roaming"
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support"
-    # Linux / other unix
     base = os.environ.get("XDG_DATA_HOME")
     if base:
         return Path(base)
@@ -96,19 +103,17 @@ def bundled_model_dir() -> Path:
 
 
 def search_dirs(override: str | os.PathLike | None = None) -> list[Path]:
-    """Ordered list of directories that may hold model files."""
-    out: list[Path] = []
-    if override:
-        out.append(Path(override))
-    env_override = os.environ.get(ENV_VAR)
-    if env_override:
-        out.append(Path(env_override))
-    out.append(user_model_dir())
+    """Ordered list of directories that may hold a model set.
+
+    A named folder (``override``, else ``SWCSTUDIO_MODEL_DIR``) is searched alone."""
+    named = override or os.environ.get(ENV_VAR)
+    if named:
+        return [Path(named)]
+    out: list[Path] = [user_model_dir()]
     bundled_override = os.environ.get(BUNDLED_ENV_VAR)
     if bundled_override:
         out.append(Path(bundled_override))
     out.append(bundled_model_dir())
-    # De-duplicate while preserving order.
     seen: set[str] = set()
     deduped: list[Path] = []
     for d in out:
@@ -120,88 +125,93 @@ def search_dirs(override: str | os.PathLike | None = None) -> list[Path]:
     return deduped
 
 
+def _candidate_dirs(override: str | os.PathLike | None = None) -> list[Path]:
+    """Each search directory's versioned model folder, then the directory itself."""
+    name = labeler_models_dirname()
+    out: list[Path] = []
+    for d in search_dirs(override):
+        out.extend([d / name, d])
+    return out
+
+
+def _is_complete(folder: Path) -> bool:
+    return all((folder / MODEL_FILES[key]).is_file() for key in REQUIRED_MODELS)
+
+
+def _first_complete(override: str | os.PathLike | None) -> Path | None:
+    for folder in _candidate_dirs(override):
+        if _is_complete(folder):
+            return folder
+    return None
+
+
+def resolve_model_dir(
+    override: str | os.PathLike | None = None,
+    *,
+    auto_download: bool = True,
+) -> Path | None:
+    """The first complete model folder in search order, or ``None``.
+
+    If none is found and ``auto_download`` is set, the model set of the latest
+    release is fetched into the user data directory (see
+    :mod:`swcstudio.core.updater`) and the search runs again. Installed copies
+    carry the model set, so this is a repair path, not a first-run requirement.
+    """
+    found = _first_complete(override)
+    if found is not None or not auto_download or override or os.environ.get(ENV_VAR):
+        return found
+    try:
+        from swcstudio.core import updater  # noqa: PLC0415
+    except ImportError:
+        return None
+    manifest = updater.fetch_manifest()
+    if manifest is None or manifest.models is None:
+        return None
+    try:
+        updater.apply_update("models", manifest.models)
+    except Exception:  # noqa: BLE001 - network or disk failure; report "not found"
+        return None
+    return _first_complete(override)
+
+
 def resolve_model_path(
     name_or_filename: str,
     *,
     override: str | os.PathLike | None = None,
     auto_download: bool = True,
 ) -> Path | None:
-    """Locate one model file by short name or by literal filename.
-
-    ``name_or_filename`` accepts both ``"stage1"`` and
-    ``"cell_type_classifier.pkl"``. Returns the first existing path
-    found in :func:`search_dirs`, or ``None``.
-
-    If no local copy is found and ``auto_download=True`` (default),
-    falls back to fetching the models package from GitHub Releases via
-    :mod:`swcstudio.core.updater`. Published wheels bundle the production
-    models, so this network path is a repair/update fallback rather than
-    a normal first-run requirement.
-
-    Set ``auto_download=False`` to skip the network fallback (used by
-    diagnostic / testing paths that want to know "is the model
-    physically here right now").
-    """
-    fname = MODEL_FILES.get(name_or_filename, name_or_filename)
-    for d in search_dirs(override):
-        candidate = d / fname
-        if candidate.is_file():
-            return candidate
-
-    if not auto_download:
+    """One file of the resolved model folder, by short name or file name."""
+    folder = resolve_model_dir(override, auto_download=auto_download)
+    if folder is None:
         return None
-
-    # Lazy import — keeps `model_paths` itself stdlib-only and avoids a
-    # circular import at module load time (`updater` doesn't import
-    # `model_paths`, but importing it eagerly here would still bind a
-    # network-capable module into a path-resolution helper).
-    try:
-        from swcstudio.core import updater  # noqa: WPS433
-    except ImportError:
-        return None
-
-    manifest = updater.fetch_manifest()
-    if manifest is None or manifest.models is None:
-        return None
-    try:
-        updater.apply_update("models", manifest.models)
-    except Exception:
-        # Network failure / disk failure / integrity mismatch — give up
-        # silently and let the caller report "model not found".
-        return None
-
-    # Re-scan after the download. The user model directory is part of
-    # search_dirs(), so the fresh files will be found.
-    for d in search_dirs(override):
-        candidate = d / fname
-        if candidate.is_file():
-            return candidate
-    return None
+    candidate = folder / MODEL_FILES.get(name_or_filename, name_or_filename)
+    return candidate if candidate.is_file() else None
 
 
-def available_models(
-    override: str | os.PathLike | None = None,
-) -> dict[str, Path | None]:
-    """Return ``{short_name: Path | None}`` for every standard model."""
-    return {key: resolve_model_path(key, override=override) for key in MODEL_FILES}
+def available_models(override: str | os.PathLike | None = None) -> dict[str, Path | None]:
+    """``{short_name: Path | None}`` for every model file of the resolved folder."""
+    folder = resolve_model_dir(override, auto_download=False)
+    return {key: (folder / fname if folder is not None and (folder / fname).is_file() else None)
+            for key, fname in MODEL_FILES.items()}
 
 
-def diagnostic_search_report(
-    override: str | os.PathLike | None = None,
-) -> str:
-    """Human-readable description of where the resolver looked. Useful in
-    error messages when a model cannot be found."""
-    lines: list[str] = ["Search order:"]
-    for d in search_dirs(override):
-        marker = "[EXISTS]" if d.is_dir() else "[MISSING]"
-        lines.append(f"  {marker} {d}")
-    lines.append("Required files:")
-    for short, fname in MODEL_FILES.items():
-        found = resolve_model_path(short, override=override)
-        marker = f"[FOUND] {found}" if found else "[NOT FOUND]"
-        lines.append(f"  {short:<8s} ({fname})  {marker}")
+def diagnostic_search_report(override: str | os.PathLike | None = None) -> str:
+    """Human-readable description of where the resolver looked."""
+    lines: list[str] = [f"Labeler {labeler_info()['version']}; model folders searched, in order:"]
+    for folder in _candidate_dirs(override):
+        missing = [MODEL_FILES[k] for k in REQUIRED_MODELS if not (folder / MODEL_FILES[k]).is_file()]
+        if not missing:
+            marker = "[COMPLETE]"
+        elif not folder.is_dir():
+            marker = "[MISSING]"
+        elif len(missing) == len(REQUIRED_MODELS):
+            marker = "[no model files]"
+        else:
+            marker = f"[INCOMPLETE: missing {', '.join(missing)}]"
+        lines.append(f"  {marker} {folder}")
     lines.append(
-        f"Override via env var {ENV_VAR}=/path/to/dir or via the "
-        f"`--model-dir` CLI flag / GUI selector."
-    )
+        "A model folder needs " + ", ".join(MODEL_FILES[k] for k in REQUIRED_MODELS)
+        + f"; {MODEL_FILES['flag']} adds the quality flag.")
+    lines.append(f"Point to one with {ENV_VAR}=/path/to/dir, the `--model-dir` CLI flag "
+                 "or the GUI selector.")
     return "\n".join(lines)

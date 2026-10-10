@@ -27,8 +27,6 @@ def bundle_inputs() -> tuple[list, list, list[str]]:
     """
     datas: list = []
     datas += collect_data_files("vispy")
-    datas += collect_data_files("torch_geometric", include_py_files=True)
-    datas += collect_data_files("torch", include_py_files=True)
     datas += collect_data_files("xgboost", includes=["VERSION"])
     for distribution in (
         "neurom",
@@ -36,8 +34,6 @@ def bundle_inputs() -> tuple[list, list, list[str]]:
         "swcstudio",
         "vispy",
         "scikit-learn",
-        "torch",
-        "torch_geometric",
         "xgboost",
         "zstandard",
         "pyzipper",
@@ -52,7 +48,6 @@ def bundle_inputs() -> tuple[list, list, list[str]]:
         + collect_submodules("sklearn", filter=_exclude_test_modules)
         + collect_submodules("scipy", filter=_exclude_test_modules)
         + collect_submodules("xgboost", filter=_exclude_xgboost_tests)
-        + collect_submodules("torch_geometric", filter=_exclude_test_modules)
         + [
             "PySide6",
             "PySide6.QtCore",
@@ -65,8 +60,8 @@ def bundle_inputs() -> tuple[list, list, list[str]]:
             "vispy",
             "vispy.app.backends._qt",
             "vispy.app.backends._pyside6",
-            "torch",
             "xgboost",
+            "joblib",
             "numpy",
             "pandas",
             "scipy",
@@ -82,13 +77,14 @@ def bundle_inputs() -> tuple[list, list, list[str]]:
     return datas, binaries, hiddenimports
 
 
-MODULE_COLLECTION_MODE = {
-    "torch_geometric": "pyz+py",
-    "torch": "pyz+py",
-}
+MODULE_COLLECTION_MODE: dict[str, str] = {}
 
 EXCLUDES = [
     "swcstudio",
+    # Auto-labeling needs no deep-learning framework; keep one installed in the
+    # build environment out of the bundle.
+    "torch",
+    "torch_geometric",
     "xgboost.testing",
     "hypothesis",
     "pytest",

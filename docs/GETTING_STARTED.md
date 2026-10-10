@@ -32,9 +32,9 @@ Use this path if you only need the desktop application and don't want to deal wi
    - **macOS** — drag `SWC-Studio.app` into `/Applications`, then double-click. First launch may need `xattr -cr /Applications/SWC-Studio.app` (or right-click → Open) because the bundle is not yet code-signed.
    - **Windows** — extract anywhere, run the `.exe` inside.
 
-The auto-typing models are bundled inside the app, so the first auto-label
-call works without any download. Release executables are intended to be
-portable CPU builds. Use a pip or source install for GPU acceleration.
+The auto-labeler's model files are bundled inside the app, so the first
+auto-label run works without any download. Auto-labeling runs on the
+CPU and needs no GPU.
 
 ## Option 2 — `pip install` from PyPI
 
@@ -66,18 +66,18 @@ swcstudio-gui
 ```
 
 That single `python -m pip install swcstudio` command installs every
-Python runtime requirement: the scientific stack, PyTorch and
-torch-geometric, XGBoost and scikit-learn, PySide6, VisPy, pyqtgraph,
-and the history/provenance libraries. The wheel also contains all
-runtime JSON configuration and all eight production models. There is
-no separate requirements file, model download, or `[gui]` extra.
+Python runtime requirement: the scientific stack, XGBoost and
+scikit-learn, PySide6, VisPy, pyqtgraph, and the history/provenance
+libraries. The wheel also contains all runtime JSON configuration and
+the four model files of the SWC auto-labeler. There is no separate
+requirements file, model download, or `[gui]` extra.
 
 The CI release gate installs the built wheel into an empty virtual
 environment and runs model deserialization, GUI imports, and inference
 on Windows, macOS, and Linux with Python 3.10, 3.11, and 3.12.
 
-To upgrade later: `python -m pip install --upgrade swcstudio`. The new
-wheel installs the matching code, configuration, and production models.
+To upgrade later: `python -m pip install --upgrade swcstudio`. The
+upgrade installs the matching code, configuration, and models.
 
 If `swcstudio doctor` reports an executable outside the environment you
 created, run the commands by absolute environment path, for example
@@ -97,9 +97,8 @@ git clone https://github.com/Mio0v0/SWC-Studio.git
 cd SWC-Studio
 ```
 
-One command installs everything — the CLI, the desktop GUI, the
-auto-typing engine (sklearn + torch + torch_geometric), and the
-bundled model files:
+One command installs everything: the CLI, the desktop GUI, the
+auto-labeler (scikit-learn and XGBoost), and the bundled model files.
 
 ### macOS / Linux
 
@@ -149,7 +148,7 @@ How you update depends on how you installed:
 
 | Install method | How to update |
 |---|---|
-| Option 1 (bundled app) | Help → **Check for Updates** in the GUI. The in-app updater downloads only the changed layer (~5 MB code or ~80 MB models), no full re-download. |
+| Option 1 (bundled app) | Help → **Check for Updates** in the GUI. The in-app updater downloads only the changed layer (code or models), no full re-download. |
 | Option 2 (pip) | `python -m pip install --upgrade swcstudio` installs the matching code, dependencies, configuration, and bundled models. |
 | Option 3 (source) | `git pull` followed by `python -m pip install -e .` to pick up any new dependencies or metadata. |
 
@@ -164,7 +163,6 @@ for the architecture details.
 swcstudio --help
 swcstudio doctor
 swcstudio models status
-swcstudio gpu-status
 swcstudio-gui --help
 ```
 
@@ -176,18 +174,11 @@ python -m swcstudio.gui.main
 ```
 
 `swcstudio models status` is worth running once after install: it
-prints the auto-labeling engine's model search path and confirms the
-bundled model files are reachable. You should see the labeling files
+prints the auto-labeler's version, the model folders it searched, and
+the folder it uses. One `labeler-1.0.0` folder should be marked
+`[COMPLETE]`, and the JSON summary should list the paths of
 `cell_type_classifier.pkl`, `branch_classifier.pkl`,
-`gnn_apical_basal.pt`, `gnn_branch3_rescue.pt`, the QC gate
-`qc_gate.pkl`, and the flag-scoring files `flag_model_pyramidal.joblib`,
-`flag_model_interneuron.joblib`, and `flag_model_all.joblib` listed as
-`[FOUND]`.
-
-`swcstudio gpu-status` is optional. It explains whether the active pip or
-source environment can use CUDA, and what is missing when it cannot. The
-GUI exposes the same check under Help -> GPU Readiness. For setup
-details, see [GPU Setup](GPU_INSTALL.md).
+`branch_correction.joblib`, and `flag_model.joblib`.
 
 ## First CLI checks
 
@@ -211,10 +202,14 @@ Single-file edit commands update the source SWC directly and record the
 operation in `<stem>_history.swcstudio` next to the file. No separate
 `--write` flag is required.
 
-`auto-label` always applies soma / axon / basal labeling, detects apical
-labels when appropriate, and can flag cells whose predicted labels look
-unreliable. Use `--cell-type pyramidal` or `--cell-type interneuron`
-when you already know the cell type; leave it unknown to run Stage 1.
+`auto-label` labels every node as soma, axon, basal dendrite or apical
+dendrite with the SWC auto-labeler. By default Stage 1 decides the cell
+class; use `--cell-class 3-class` (axon, basal, apical) or
+`--cell-class 2-class` (axon, dendrite) to choose it. The quality flag
+predicts how well the cell was labeled (its per-cell F1) and flags the
+cell for review when that falls below the flag's cut-off; `--no-flag`
+turns it off. See
+[Auto-Typing Engine](documentation/auto-typing-backends.md).
 
 ## First GUI checks
 

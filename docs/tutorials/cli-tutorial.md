@@ -63,7 +63,7 @@ swcstudio index-clean cell.swc
 swcstudio auto-fix cell.swc
 swcstudio auto-label cell.swc
 swcstudio auto-label cell.swc --model-dir ~/my-models   # custom-trained models
-swcstudio auto-label cell.swc --cell-type pyramidal --flag-strictness 0.8
+swcstudio auto-label cell.swc --cell-class 3-class
 swcstudio auto-label cell.swc --no-flag
 swcstudio set-type cell.swc --node-id 14169 --new-type 3
 swcstudio set-radius cell.swc --node-id 42 --radius 0.75
@@ -77,9 +77,12 @@ Single-file edit commands automatically write:
 
 The source SWC receives compact `# @PROV` pointer lines, and existing
 SWC/SWC+ comment headers are preserved.
-Auto-label uses the v12 QC-label-flag engine. Leave cell type as
-unknown to run Stage 1, or pass `--cell-type pyramidal` /
-`--cell-type interneuron` when the user already knows the type.
+
+`auto-label` runs the SWC auto-labeler. By default Stage 1 decides the
+cell class. Pass `--cell-class 3-class` (axon, basal, apical) or
+`--cell-class 2-class` (axon, dendrite) when you already know it. The
+JSON output shows the cell class, the predicted per-cell F1 and whether
+the cell is flagged for review.
 
 ## Step 5: Use batch commands for folders
 
@@ -92,7 +95,7 @@ swcstudio validate ./swc-folder
 swcstudio split ./swc-folder
 swcstudio auto-typing ./swc-folder
 swcstudio auto-typing ./swc-folder --model-dir ~/my-models   # custom-trained models
-swcstudio auto-typing ./swc-folder --cell-type unknown --flag-strictness 0.5
+swcstudio auto-typing ./swc-folder --flag-budget 0.05
 swcstudio radii-clean ./swc-folder
 swcstudio simplify ./swc-folder
 swcstudio index-clean ./swc-folder
@@ -100,18 +103,28 @@ swcstudio index-clean ./swc-folder
 
 Mutating batch commands update each processed source SWC in place and
 record operation history for each file. `split` is the main exception
-because it intentionally creates new derived SWC files.
+because it intentionally creates separate derived SWC files.
+
+`auto-typing` also ranks the labeled cells for review, unless you pass
+`--no-flag`. Each cell class flags its riskiest share (`--flag-budget`,
+10% by default). The ranking is saved in the folder as
+`<folder>_flag_review_<timestamp>.json` with a `.csv` copy. Open the
+JSON file in the GUI's Flag Review window to review the flagged cells;
+see
+[Reviewing Flagged Cells](../documentation/auto-typing-backends.md#reviewing-flagged-cells).
 
 ## Step 5b: Train your own auto-typing models
 
-If you have a labeled SWC corpus, you can train the three core custom
-models tuned to your data: Stage 1, Stage 2, and the Stage 2b GNN.
+If you have a labeled SWC corpus, you can train the auto-labeler on your
+own data. The command fits all four model files: Stage 1 (cell class),
+Stage 2 (subtree labels), the Stage 3 branch correction, and the
+Stage 4 quality flag.
 
 ```bash
 swcstudio train auto-typing --data-dir ./labeled --output-dir ./my-models
 # Inspect what landed:
 swcstudio models status --model-dir ./my-models
-# Use the new models for one run:
+# Use the trained models for one run:
 swcstudio auto-label cell.swc --model-dir ./my-models
 ```
 
@@ -119,23 +132,19 @@ The dataset layout must be:
 
 ```
 labeled/
-    pyramidal/   *.swc
-    interneuron/ *.swc
+    pyramidal/   *.swc   (3-class cells: axon, basal, apical)
+    interneuron/ *.swc   (2-class cells: axon, dendrite)
 ```
 
-The standard `python -m pip install -e .` already includes torch and
-torch_geometric, so GNN training works out of the box. Use `--no-gnn`
-only when you want to refresh Stages 1+2 against an existing
-`gnn_apical_basal.pt` checkpoint that's already in `--output-dir`.
+The trainer holds out 20% of the files by default. The labeler is not
+fitted on them; the quality flag is fitted on them instead. A few
+hundred cells train in minutes.
 
-The bundled production auto-labeler also uses Branch3, QC, and flag
-artifacts. The custom-training command currently trains the core
-Stage 1 + Stage 2 + Stage 2b stack only.
-
-To make your custom models the new default everywhere (no `--model-dir`
-flag needed), copy them into your user data directory — see the
+To make your custom models the default everywhere (no `--model-dir`
+flag needed), set the `SWCSTUDIO_MODEL_DIR` environment variable to
+their folder. See the
 [Auto-Typing Engine](../documentation/auto-typing-backends.md#training-custom-models)
-page for the per-platform path.
+page for all training options.
 
 ## Step 6: Use temporary config overrides
 

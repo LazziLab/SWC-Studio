@@ -1,10 +1,8 @@
 """Single-file auto-typing for the Validation tool.
 
-Thin wrapper around :mod:`swcstudio.core.auto_typing`. The engine itself
-is the v12 QC-label-flag pipeline; there is no backend selection. The
-runtime knobs are the user model directory override, optional cell-type
-override, flag scoring strictness, and whether to use the subtree Stage
-2 head.
+Thin wrapper around :mod:`swcstudio.core.auto_typing`, which runs the SWC
+auto-labeler. The runtime knobs are the model directory override, the cell
+class (automatic, 3-class or 2-class) and whether the quality flag runs.
 """
 
 from __future__ import annotations
@@ -42,10 +40,9 @@ def _options_from_config(cfg: dict[str, Any]) -> BatchOptions:
         basal=True,
         rad=False,
         zip_output=False,
-        cell_type=(cfg.get("cell_type") or "unknown"),
+        cell_type=(cfg.get("cell_type") or "auto"),
         flag_enabled=bool(cfg.get("flag_enabled", True)),
-        flag_strictness=float(cfg.get("flag_strictness", 0.5)),
-        flag_feature_mode="compact",
+        flag_budget=float(cfg.get("flag_budget", 0.10)),
     )
 
 
@@ -71,7 +68,6 @@ def run_file(
         write_output=write_output,
         write_log=write_log,
         model_dir=(cfg.get("model_dir") or None),
-        use_subtree_stage2=bool(cfg.get("use_subtree_stage2", True)),
     )
 
 
@@ -130,7 +126,11 @@ def auto_label_file(
         "out_type_counts": dict(getattr(result_obj, "out_type_counts", {}) or {}),
         "cell_type": getattr(result_obj, "cell_type", None),
         "cell_type_source": getattr(result_obj, "cell_type_source", "stage1"),
+        "stage1_cell_type": getattr(result_obj, "stage1_cell_type", None),
         "stage1_confidence": getattr(result_obj, "stage1_confidence", None),
+        "class_mismatch": bool(getattr(result_obj, "class_mismatch", False)),
+        "notes": list(getattr(result_obj, "notes", []) or []),
+        "labeler_version": getattr(result_obj, "labeler_version", None),
         "qc_result": dict(getattr(result_obj, "qc_result", {}) or {}),
         "flag_result": dict(getattr(result_obj, "flag_result", {}) or {}),
         "change_details": list(getattr(result_obj, "change_details", []) or []),

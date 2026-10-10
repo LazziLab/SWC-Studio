@@ -456,8 +456,10 @@ def _type_suspicion_from_dataframe(
         with tempfile.NamedTemporaryFile(prefix="swcstudio_issue_type_", suffix=".swc", delete=False) as tmp:
             tmp.write(write_swc_to_bytes_preserve_tokens(df))
             tmp_path = Path(tmp.name)
+        # Only the labels are compared here, so the quality flag is not scored.
         result_obj = run_validation_auto_typing_file(
             str(tmp_path),
+            config_overrides={"flag_enabled": False},
             write_output=False,
             write_log=False,
         )
@@ -480,8 +482,8 @@ def compute_type_suspicion_issues(df: pd.DataFrame | None) -> list[dict[str, Any
     """Run the auto-typing engine on ``df`` and return the ``Likely wrong
     labels`` issues. Exposed separately so callers (typically the GUI)
     can run it on a worker thread instead of blocking the issue panel
-    while the full v12 QC-label-flag pipeline runs on
-    the morphology — which can take seconds on large cells.
+    while the auto-labeler runs on the morphology — which can take
+    seconds on large cells.
     """
     if df is None or df.empty:
         return []

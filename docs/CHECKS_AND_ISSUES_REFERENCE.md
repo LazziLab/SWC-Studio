@@ -16,6 +16,7 @@ Primary code sources:
 - `swcstudio/core/issues.py`
 - `swcstudio/core/radii_cleaning.py`
 - `swcstudio/core/auto_typing/` (engine package)
+- `swcstudio/core/labeler/` (the SWC auto-labeler's code, copied by `scripts/sync_labeler.py`)
 - `swcstudio/tools/validation/configs/default.json`
 - `swcstudio/tools/batch_processing/configs/radii_cleaning.json`
 - `swcstudio/tools/batch_processing/configs/auto_typing.json`
@@ -115,7 +116,7 @@ These are shown in the issue-driven workflow but are not entries in `default.jso
 |---|---|---|---|---|
 | `blocked_validation_checks` | `Checks blocked by ...` | Grouped from validation rows that could not run because morphology building failed. | none | Validation or Manual Label Editing, depending on cause |
 | `radii_outlier_batch` | `Outlier radii detected` | Runs the shared radii-cleaning engine and groups nodes the cleaner would change. | `swcstudio/tools/batch_processing/configs/radii_cleaning.json` | Auto Radii Editing |
-| `type_suspicion_batch` | `Likely wrong labels` | Runs the shared auto-typing engine and groups nodes where current type differs from suggested type. | `swcstudio/tools/batch_processing/configs/auto_typing.json` | Auto Label Editing |
+| `type_suspicion_batch` | `Likely wrong labels` | Runs the auto-labeler on the file (labels only; the quality flag is not scored) and groups the nodes whose current type differs from the labeler's type. In the GUI it runs again on each validation refresh. | `swcstudio/tools/batch_processing/configs/auto_typing.json` (its `cell_type` and `model_dir`) | Auto Label Editing |
 
 ## Issue Model
 
@@ -199,70 +200,69 @@ Important defaults:
 ## Auto Labeling Algorithm
 
 The suspicious label issue and Auto Label Editing run the same
-auto-typing engine, implemented in:
+engine, the SWC auto-labeler 1.0.0. It is implemented in:
 
 - `swcstudio/core/auto_typing/` (engine package)
-- `swcstudio/tools/batch_processing/configs/auto_typing.json` (user-editable runtime knobs)
+- `swcstudio/core/labeler/` (the labeler's own code)
+- `swcstudio/tools/batch_processing/configs/auto_typing.json` (user-editable settings)
+
+The suspicious label issue compares labels only. It does not score the
+quality flag.
 
 ### Pipeline architecture
 
-Auto-labeling runs three groups of work in sequence: a **QC gate**
-that decides whether to label at all, a **labeling model** that
-assigns the per-node types, and **flag scoring** that highlights low-
-confidence labels for review.
+Each file goes through five stages. The model files live in the
+`labeler-1.0.0/` model folder.
 
-| Step | Files | What it produces |
+| Stage | Files | What it produces |
 |---|---|---|
-| **QC gate** | `qc_gate.pkl` | Pass / reject decision plus a specific reason. Rejects malformed, disconnected, or out-of-distribution files before any labeling runs. Unlabeled type-0 inputs are allowed through. |
-| **Cell typing** | `cell_type_classifier.pkl` | Pyramidal vs interneuron. Uses a soft handoff: when confidence is low it runs subtree labeling for both cell types and picks the higher-confidence outcome. |
-| **Subtree labeling** | `branch_classifier.pkl` | Per-primary-subtree assignment as axon / basal / apical. |
-| **Apical/basal GNN** | `gnn_apical_basal.pt` | GraphSAGE re-decision over the branch graph for pyramidal dendrites. |
-| **Apical/basal rescue** | `gnn_branch3_rescue.pt` | Conservative GraphSAGE rescue head for the hardest pyramidal apical/basal cases. |
-| **Topology refinement** | — | Soma-boundary constraints applied (one primary axon, one primary apical), short islands flipped. |
-| **Flag scoring** | `flag_model_pyramidal.joblib`, `flag_model_interneuron.joblib`, `flag_model_all.joblib` | Per-node score of how likely each predicted label is wrong. Surface in the GUI issue panel and in the CLI JSON output. |
+| **Stage 0, structural checks** | none (rules) | Pass or reject. A file must hold one connected cell (a single root and no orphan nodes) with a soma, at least one neurite node, between 10 and 200,000 nodes, finite coordinates, and finite, non-negative radii. A rejected file is not labeled; the error says `QC rejected` and lists the reasons. A file without a soma label takes its root as the soma. A file without neurite labels is labeled from geometry alone. |
+| **Stage 1, cell class** | `cell_type_classifier.pkl` | 3-class (axon, basal, apical) or 2-class (axon, dendrite), decided from whole-cell shape, unless the user chooses the class. |
+| **Stage 2, subtree labels** | `branch_classifier.pkl` | A gradient-boosted classifier labels each primary subtree that leaves the soma. |
+| **Stage 3, topology rules and correction** | `branch_correction.joblib` | Rules enforce the expected anatomy, for example a single axon tree and, for 3-class cells, a single apical tree. For 3-class cells, a learned correction then re-decides single branches within 150 µm of path length from the soma. |
+| **Stage 4, quality flag** | `flag_model.joblib` | One flag per cell class. It predicts the cell's per-cell F1. A single file is flagged below the flag's fixed cut-off; a batch flags the riskiest share of each cell class (10% by default). It never changes labels. |
 
-`flag_feature_mode` controls flag-score features; both `compact` and
-`simple` map to the bundled fast flagger.
+A file whose soma nodes form several disconnected groups is refused
+before Stage 0. Split it first.
 
-### Apical detection
+### Cell class and apical labels
 
-Apical labeling requires both a learned per-subtree score and a
-minimum subtree-root radius. Files without a qualifying apical
-subtree get 3-class output (soma / axon / basal); files with one get
-4-class output (soma / axon / basal / apical). There are no
-class-selection flags exposed to the user.
+Only 3-class cells get apical labels (type 4). 2-class cells get axon
+(type 2) and dendrite labels; the dendrites are written as type 3.
+
+The cell class comes from Stage 1 when it is set to `auto`. The user can
+choose `3-class` or `2-class` instead in the GUI, on the CLI
+(`--cell-class`) or in the configuration file. Stage 1 still runs. If
+it predicts the other class, the chosen class is used and the cell is
+flagged as a class mismatch.
 
 ### Config keys
 
 The user-editable JSON at
-`swcstudio/tools/batch_processing/configs/auto_typing.json` is small —
-the engine's behavior is set by the trained model files, not by
-hand-tuned weights. Current keys:
+`swcstudio/tools/batch_processing/configs/auto_typing.json` is small.
+The engine's behavior is set by the trained model files, not by
+hand-tuned weights. Keys:
 
-- `model_dir` — override the model search path (empty string means use
-  the default search order: env var → user data dir → bundled)
-- `use_subtree_stage2` — whether Stage 2 operates on full primary
-  subtrees (default `true`)
-- `cell_type` - `unknown` runs Stage 1; `pyramidal` or `interneuron`
-  bypasses Stage 1 with the user-provided type
-- `flag_enabled` - enable learned per-cell bad-label flag scoring
-- `flag_strictness` - tune flagging from loose to conservative
-- `flag_feature_mode` - compatibility field; compact scoring is always
-  used in SWC-Studio
-- `enabled` — feature gate (default `true`)
-- `notes` — free-form description; not consumed by the engine
+- `enabled`: `true` by default
+- `model_dir`: a model folder to use. An empty string means the
+  `SWCSTUDIO_MODEL_DIR` folder when that variable is set, and otherwise
+  the default search: the user data folder, the desktop app's model
+  folder, then the package folder.
+- `cell_type`: `auto` (Stage 1 decides), `3-class` or `2-class`
+- `flag_enabled`: score the quality flag (`true` by default)
+- `flag_budget`: the share of each cell class a batch flags for review
+  (`0.1` by default)
+- `notes`: a description for people; the engine does not read it
 
-To swap in your own trained models without editing this file, copy them
-into the user data directory (`%APPDATA%\swcstudio\models\` on Windows,
-`~/Library/Application Support/swcstudio/models/` on macOS, or
-`~/.local/share/swcstudio/models/` on Linux) and they take precedence
-over the bundled defaults.
+To use your own trained models everywhere without editing this file,
+set the `SWCSTUDIO_MODEL_DIR` environment variable to their folder.
+Model updates install into the user data folder (`%APPDATA%\swcstudio\models\`
+on Windows, `~/Library/Application Support/swcstudio/models/` on macOS,
+or `~/.local/share/swcstudio/models/` on Linux) and replace its
+contents, so do not keep your own models there.
 
-`flag_feature_mode` behavior:
-
-- `compact` is the bundled fast flagger and uses features the labeling
-  stage already computed.
-- `simple` is accepted as an alias for compact.
+See [Auto-Typing Engine](documentation/auto-typing-backends.md) for
+model resolution, the flag review, and training.
 
 ## How Checks Become GUI Issues
 

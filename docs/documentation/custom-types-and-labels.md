@@ -75,9 +75,10 @@ Current label-editing paths include:
 - `Morphology Editing -> Manual Label Editing`
   - change one node type directly
 - `Morphology Editing -> Auto Label Editing`
-  - run the auto-typing engine. It uses the bundled model files by
-    default; point it at a custom-trained model directory via the
-    panel's *Model dir* picker
+  - run the SWC auto-labeler. It uses the bundled model files by
+    default; point it at a custom-trained model folder with the
+    panel's *Model folder* picker. It writes the built-in types 1 to 4
+    only
 - `dendrogram-edit`
   - reassign a subtree from the CLI
 

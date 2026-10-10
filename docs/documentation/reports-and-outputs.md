@@ -63,6 +63,15 @@ validation/report-only commands, while `split`, `history
 checkout`, and `history checkpoint` intentionally create separate SWC
 files.
 
+Batch auto-labeling (`swcstudio auto-typing` or the GUI's Batch
+Processing -> Auto Label Editing) with the quality flag on also writes a
+flag review into the folder: `<folder>_flag_review_<timestamp>.json`
+and a `.csv` copy. It
+lists every file with its cell class, predicted per-cell F1, rank and
+flag. The GUI's Flag Review window reads it and saves your review marks
+back into it. See
+[Reviewing Flagged Cells](auto-typing-backends.md#reviewing-flagged-cells).
+
 ## GUI history behavior
 
 Tracked GUI morphology edits update the source SWC directly and record

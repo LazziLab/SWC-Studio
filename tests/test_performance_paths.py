@@ -66,37 +66,29 @@ class PerformancePathTests(unittest.TestCase):
         self.assertFalse(history.can_redo)
 
     def test_stage_models_are_loaded_once_per_unchanged_file(self) -> None:
-        from swcstudio.core.auto_typing import cell_type_detector, pipeline
+        from swcstudio.core.auto_typing._pickle_compat import labeler_pickle_aliases
+        from swcstudio.core.labeler import _model_cache, infer_pipeline
+        from swcstudio.core.labeler.stage1 import cell_type_detector
 
         stage1 = resolve_model_path("stage1")
         stage2 = resolve_model_path("stage2")
         self.assertIsNotNone(stage1)
         self.assertIsNotNone(stage2)
 
-        cell_type_detector._CLASSIFIER_CACHE.clear()
-        pipeline._STAGE2_BUNDLE_CACHE.clear()
-        original_stage1_load = cell_type_detector.pickle.load
-        original_stage2_load = pipeline.pickle.load
-
-        with patch.object(
-            cell_type_detector.pickle,
-            "load",
-            wraps=original_stage1_load,
-        ) as stage1_load:
-            first = cell_type_detector.CellTypeClassifier.load(stage1)
-            second = cell_type_detector.CellTypeClassifier.load(stage1)
-        self.assertIs(first, second)
-        self.assertEqual(stage1_load.call_count, 1)
-
-        with patch.object(
-            pipeline.pickle,
-            "load",
-            wraps=original_stage2_load,
+        _model_cache.clear()
+        original_load = infer_pipeline.pickle.load
+        with labeler_pickle_aliases(), patch.object(
+            infer_pipeline.pickle, "load", wraps=original_load,
         ) as stage2_load:
-            first_bundle = pipeline._load_stage2_bundle(Path(stage2))
-            second_bundle = pipeline._load_stage2_bundle(Path(stage2))
+            first_bundle = infer_pipeline.load_stage2_bundle(Path(stage2))
+            second_bundle = infer_pipeline.load_stage2_bundle(Path(stage2))
         self.assertIs(first_bundle, second_bundle)
         self.assertEqual(stage2_load.call_count, 1)
+
+        with labeler_pickle_aliases():
+            first = cell_type_detector.load_classifier(stage1)
+            second = cell_type_detector.load_classifier(stage1)
+        self.assertIs(first, second)
 
     def test_non_unique_ids_use_compressed_fallback(self) -> None:
         before = _frame(4)

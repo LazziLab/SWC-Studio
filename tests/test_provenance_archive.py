@@ -82,7 +82,7 @@ class ProvenanceArchiveTests(unittest.TestCase):
             {
                 "options": {
                     "cell_type": "pyramidal",
-                    "flag_strictness": 0.8,
+                    "flag_budget": 0.2,
                     "flag_enabled": True,
                 },
                 "effective_config": {
@@ -101,8 +101,8 @@ class ProvenanceArchiveTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(displayed["Cell Type"], "pyramidal")
-        self.assertEqual(displayed["Flag Strictness"], "0.8")
+        self.assertEqual(displayed["Cell Class"], "pyramidal")
+        self.assertEqual(displayed["Flag Review Budget"], "0.2")
         self.assertEqual(displayed["Flagging Enabled"], "Yes")
         self.assertEqual(displayed["Confidence Threshold"], "0.6")
         self.assertEqual(displayed["AI Seed"], 123)

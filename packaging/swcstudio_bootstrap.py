@@ -9,7 +9,7 @@ is to:
    downloaded override dir over the bundled-with-the-app copy.
 2. Add that directory to ``sys.path``.
 3. Call multiprocessing.freeze_support() — the standard PyInstaller fix
-   that prevents joblib / torch worker spawns from re-launching the GUI.
+   that prevents joblib worker spawns from re-launching the GUI.
 4. Import and run ``swcstudio.gui.main.main``.
 
 Why this matters
@@ -37,7 +37,7 @@ PyInstaller's static analyzer follows ``import`` statements at the top
 of the entrypoint. Because we use ``__import__("swcstudio.gui.main", …)``
 (a runtime string-based import), PyInstaller does **not** bundle the
 swcstudio package — exactly what we want. To make it still bundle the
-heavy library dependencies (numpy, torch, PySide6, vispy, etc.), the
+heavy library dependencies (numpy, XGBoost, PySide6, vispy, etc.), the
 modular spec lists those explicitly under ``hiddenimports``.
 """
 from __future__ import annotations
@@ -182,7 +182,7 @@ def main() -> int:
 
     # Lazy / runtime import — PyInstaller's static analyzer cannot follow
     # ``__import__`` with a string argument, so swcstudio is *not* baked into
-    # the PyInstaller bundle. The heavy deps (numpy, torch, PySide6, …) are
+    # the PyInstaller bundle. The heavy deps (numpy, XGBoost, PySide6, …) are
     # still bundled because the modular spec lists them as hiddenimports.
     main_mod = __import__("swcstudio.gui.main", fromlist=["main"])
     main_mod.main()

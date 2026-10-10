@@ -61,15 +61,15 @@ Common repair paths:
 
 - `Index Clean`
 - `Manual Label Editing`
-- `Auto Label Editing` — runs the auto-typing engine. The bundled
-  model files work out of the box, so just click **Run**. To use
-  custom-trained models, use the **Browse…** button next to the
-  *Model dir* field. The green/red status indicator next to the field
-  tells you whether the engine can run with the current selection. Use
-  the cell-type selector when you already know whether the cell is
-  pyramidal or interneuron; leave it unknown to run Stage 1. The flag
-  strictness slider controls how conservatively the bad-label flagger
-  marks a cell.
+- `Auto Label Editing` runs the SWC auto-labeler on the current
+  canvas. The bundled model files work out of the box, so just click
+  **Run**. To use custom-trained models, use the **Browse...** button
+  next to the *Model folder* field. The `ready` / `unavailable`
+  indicator next to the field tells you whether the models are found.
+  Leave **Cell class** on `Auto (Stage 1 decides)`, or choose
+  `3-class (axon, basal, apical)` or `2-class (axon, dendrite)` when you
+  already know the cell. With **Quality flag** on, the result shows the
+  predicted per-cell F1 and whether the cell is flagged for review.
 - `Manual Radii Editing`
 - `Auto Radii Editing`
 - `Geometry Editing`

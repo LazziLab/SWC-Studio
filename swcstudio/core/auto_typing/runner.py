@@ -1,18 +1,21 @@
 """Public entry points for the auto-typing engine.
 
-The v12 QC-label-flag path drives every prediction:
+SWC-Studio labels with the SWC auto-labeler: ``swcstudio.core.labeler`` is a copy
+of the released labeler's code and ``labeler-<version>`` its model set, made by
+``scripts/sync_labeler.py``. For each file:
 
-* Stage 1: cell-type detector (sklearn ensemble, 49 whole-cell
-  features) decides pyramidal vs interneuron with a soft handoff.
-* Stage 2: per-subtree axon/basal/apical classifier (sklearn
-  ensemble), propagated to all branches in the same primary subtree.
-* Stage 2b: GraphSAGE GNN over the branch graph re-decides
-  apical-vs-basal for pyramidal dendrite branches.
-* Stage 3: topology refinement plus conservative Branch3 rescue.
-* QC/flag: runtime QC metadata and learned per-cell bad-label flag.
-
-The core model files are required. ``is_available`` returns False if any
-of the Stage 1, Stage 2, GNN, Branch3, or QC-gate files are missing.
+* Stage 0 checks that the file is one connected cell with a soma and finite
+  geometry. A file that fails is not labeled.
+* Stage 1 decides the cell class: 3-class (axon, basal, apical) or 2-class
+  (axon, dendrite). The user may choose the class instead; Stage 1 then still
+  runs, and a cell whose chosen class differs from Stage 1's prediction is
+  labeled with the chosen class and flagged as a class mismatch.
+* Stages 2 and 3 label each primary subtree, apply the topology rules and, for
+  3-class cells, the proximal branch correction.
+* Stage 4 scores the quality flag: the cell's predicted per-cell F1. A single
+  file is flagged when that falls below the flag's fixed cut-off. A batch flags
+  the riskiest share of each cell class (``BatchOptions.flag_budget``, 10% by
+  default); a class with too few cells for that share uses the fixed cut-off.
 
 Public surface:
 
@@ -23,13 +26,20 @@ Public surface:
 """
 from __future__ import annotations
 
+import csv
+import json
+import math
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from swcstudio.core.model_paths import (
+    MODEL_FILES,
+    available_models,
     diagnostic_search_report,
-    resolve_model_path,
+    labeler_info,
+    resolve_model_dir,
 )
 from swcstudio.core.reporting import (
     auto_typing_log_path_for_file,
@@ -42,7 +52,12 @@ from swcstudio.core.reporting import (
     write_text_report,
 )
 
+from ._pickle_compat import labeler_pickle_aliases
+from .cell_class import cell_class_name, normalize_cell_class
 from .types import BatchOptions, BatchResult, FileResult
+
+FLAG_REVIEW_JSON = "flag_review.json"
+FLAG_REVIEW_CSV = "flag_review.csv"
 
 
 # ---------------------------------------------------------------------------
@@ -51,48 +66,22 @@ from .types import BatchOptions, BatchResult, FileResult
 
 
 def is_available(*, model_dir: str | None = None) -> tuple[bool, str]:
-    """Return ``(ok, reason)`` describing whether the auto-typing engine
-    can run right now.
+    """Return ``(ok, reason)`` describing whether auto-labeling can run now.
 
-    The engine requires the v12 model files (Stage 1 sklearn pickle,
-    Stage 2 sklearn pickle, Stage 2b GNN checkpoint, Branch3 rescue
-    checkpoint, and QC gate) plus torch and
-    torch_geometric — they are required dependencies of the package, so
-    a normal install satisfies them. When something is missing this
-    returns ``(False, reason)`` with a search-path diagnostic so the
-    GUI / CLI can fail fast with a clear message.
+    It needs a complete model folder (see :mod:`swcstudio.core.model_paths`) and
+    the packages the labeler imports: joblib, scikit-learn, XGBoost and pandas.
     """
-    s1 = resolve_model_path("stage1", override=model_dir)
-    s2 = resolve_model_path("stage2", override=model_dir)
-    gnn = resolve_model_path("gnn", override=model_dir)
-    branch3 = resolve_model_path("branch3", override=model_dir)
-    qc_gate = resolve_model_path("qc_gate", override=model_dir)
-    missing = []
-    if s1 is None:
-        missing.append("Stage 1 (cell_type_classifier.pkl)")
-    if s2 is None:
-        missing.append("Stage 2 (branch_classifier.pkl)")
-    if gnn is None:
-        missing.append("Stage 2b GNN (gnn_apical_basal.pt)")
-    if branch3 is None:
-        missing.append("Branch3 rescue head (gnn_branch3_rescue.pt)")
-    if qc_gate is None:
-        missing.append("QC gate (qc_gate.pkl)")
-    if missing:
-        return False, (
-            "Auto-typing is missing required model files: "
-            + ", ".join(missing) + ".\n"
-            + diagnostic_search_report(override=model_dir)
-        )
+    if resolve_model_dir(model_dir) is None:
+        return False, ("Auto-labeling cannot find its model files.\n"
+                       + diagnostic_search_report(override=model_dir))
     try:
         import joblib  # noqa: F401
+        import pandas  # noqa: F401
         import sklearn  # noqa: F401
-        import torch  # noqa: F401
-        import torch_geometric  # noqa: F401
         import xgboost  # noqa: F401
     except Exception as exc:  # noqa: BLE001
         return False, (
-            "Auto-typing could not import one of its required ML packages "
+            "Auto-labeling could not import one of its required packages "
             f"(import failed: {exc.__class__.__name__}: {exc}). "
             "Repair the active environment with "
             "`python -m pip install --upgrade --force-reinstall swcstudio`, "
@@ -102,138 +91,25 @@ def is_available(*, model_dir: str | None = None) -> tuple[bool, str]:
 
 
 def backend_status(*, model_dir: str | None = None) -> dict[str, Any]:
-    """Structured status report. Used by the CLI ``models status`` command
-    and the GUI to surface the resolved model paths and torch availability.
-    """
-    s1 = resolve_model_path("stage1", override=model_dir)
-    s2 = resolve_model_path("stage2", override=model_dir)
-    gnn = resolve_model_path("gnn", override=model_dir)
-    branch3 = resolve_model_path("branch3", override=model_dir)
-    qc_gate = resolve_model_path("qc_gate", override=model_dir)
-    flag_pyr = resolve_model_path("flag_pyramidal", override=model_dir)
-    flag_int = resolve_model_path("flag_interneuron", override=model_dir)
-    flag_all = resolve_model_path("flag_all", override=model_dir)
-
-    torch_ok = True
-    torch_msg = "torch + torch_geometric available"
-    try:
-        import torch  # noqa: F401
-        import torch_geometric  # noqa: F401
-    except Exception as exc:  # noqa: BLE001
-        torch_ok = False
-        torch_msg = f"torch / torch_geometric unavailable: {exc.__class__.__name__}"
-
-    return {
-        "stage1_path": str(s1) if s1 else None,
-        "stage2_path": str(s2) if s2 else None,
-        "gnn_path": str(gnn) if gnn else None,
-        "branch3_path": str(branch3) if branch3 else None,
-        "qc_gate_path": str(qc_gate) if qc_gate else None,
-        "flag_pyramidal_path": str(flag_pyr) if flag_pyr else None,
-        "flag_interneuron_path": str(flag_int) if flag_int else None,
-        "flag_all_path": str(flag_all) if flag_all else None,
-        "stage1_ok": s1 is not None,
-        "stage2_ok": s2 is not None,
-        "gnn_ok": gnn is not None and torch_ok,
-        "branch3_ok": branch3 is not None and torch_ok,
-        "qc_gate_ok": qc_gate is not None,
-        "flag_pyramidal_ok": flag_pyr is not None,
-        "flag_interneuron_ok": flag_int is not None,
-        "flag_all_ok": flag_all is not None,
-        "torch_ok": torch_ok,
-        "torch_message": torch_msg,
+    """Structured status report, for ``swcstudio models status`` and the GUI."""
+    info = labeler_info()
+    folder = resolve_model_dir(model_dir, auto_download=False)
+    files = available_models(model_dir)
+    status: dict[str, Any] = {
+        "labeler_version": info["version"],
+        "labeler_commit": info["source_commit"],
+        "model_dir": str(folder) if folder is not None else None,
+        "models_ok": folder is not None,
         "search_diagnostic": diagnostic_search_report(override=model_dir),
     }
+    for key in MODEL_FILES:
+        status[f"{key}_path"] = str(files[key]) if files[key] is not None else None
+        status[f"{key}_ok"] = files[key] is not None
+    return status
 
 
 # ---------------------------------------------------------------------------
-# Internal: load GNN once and reuse across files in a batch
-# ---------------------------------------------------------------------------
-
-
-_GNN_CACHE: dict[str, Any] = {"path": None, "state": None}
-_BRANCH3_CACHE: dict[str, Any] = {"path": None, "state": None}
-_QC_GATE_CACHE: dict[str, Any] = {"path": None, "state": None}
-
-
-def _load_gnn_state(model_dir: str | None) -> Any:
-    """Load the Stage 2b GNN checkpoint. Raises if it cannot be loaded —
-    the GNN is a required pipeline stage, not optional.
-    """
-    gnn_path = resolve_model_path("gnn", override=model_dir)
-    if gnn_path is None:
-        raise FileNotFoundError(
-            "Stage 2b GNN checkpoint (gnn_apical_basal.pt) not found.\n"
-            + diagnostic_search_report(override=model_dir)
-        )
-    cache_key = str(gnn_path.resolve())
-    if _GNN_CACHE.get("path") == cache_key and _GNN_CACHE.get("state") is not None:
-        return _GNN_CACHE["state"]
-    from .gnn_inference import load_gnn  # noqa: PLC0415
-    state = load_gnn(gnn_path)
-    _GNN_CACHE["path"] = cache_key
-    _GNN_CACHE["state"] = state
-    return state
-
-
-def _load_branch3_state(model_dir: str | None) -> Any:
-    branch3_path = resolve_model_path("branch3", override=model_dir)
-    if branch3_path is None:
-        raise FileNotFoundError(
-            "Branch3 rescue checkpoint (gnn_branch3_rescue.pt) not found.\n"
-            + diagnostic_search_report(override=model_dir)
-        )
-    cache_key = str(branch3_path.resolve())
-    if _BRANCH3_CACHE.get("path") == cache_key and _BRANCH3_CACHE.get("state") is not None:
-        return _BRANCH3_CACHE["state"]
-    from .gnn_branch3_inference import load_branch3  # noqa: PLC0415
-    state = load_branch3(branch3_path)
-    _BRANCH3_CACHE["path"] = cache_key
-    _BRANCH3_CACHE["state"] = state
-    return state
-
-
-def _load_qc_gate(model_dir: str | None) -> Any | None:
-    qc_path = resolve_model_path("qc_gate", override=model_dir)
-    if qc_path is None:
-        return None
-    cache_key = str(qc_path.resolve())
-    if _QC_GATE_CACHE.get("path") == cache_key and _QC_GATE_CACHE.get("state") is not None:
-        return _QC_GATE_CACHE["state"]
-    from .qc_input import QCGate  # noqa: PLC0415
-    gate = QCGate.load(qc_path)
-    _QC_GATE_CACHE["path"] = cache_key
-    _QC_GATE_CACHE["state"] = gate
-    return gate
-
-
-def _public_qc_result(raw: Any) -> dict[str, Any] | None:
-    """Return the user-facing QC payload without bulky internals."""
-    if raw is None:
-        return None
-    if hasattr(raw, "to_dict"):
-        raw = raw.to_dict()
-    if not isinstance(raw, dict):
-        return {"passed": False, "reasons": [f"qc_error:unexpected_result:{type(raw).__name__}"]}
-    out = dict(raw)
-    out.pop("feature_vector", None)
-    return out
-
-
-def _qc_failure_reasons(qc_result: dict[str, Any] | None) -> list[str]:
-    """Return non-empty QC reasons when a file should not be auto-labeled."""
-    if not qc_result:
-        return []
-    passed = qc_result.get("passed")
-    if passed is None or bool(passed):
-        return []
-    raw_reasons = qc_result.get("reasons") or []
-    reasons = [str(reason) for reason in raw_reasons if str(reason).strip()]
-    return reasons or ["qc_failed"]
-
-
-# ---------------------------------------------------------------------------
-# SWC parse / write / diff helpers (shared with rest of swcstudio)
+# SWC parse / write / diff helpers
 # ---------------------------------------------------------------------------
 
 
@@ -248,11 +124,9 @@ def _parse_swc(path: Path) -> tuple[list[str], list[dict[str, Any]]]:
             if s.startswith("#"):
                 headers.append(line.rstrip("\n"))
                 continue
-
             parts = s.split()
             if len(parts) < 7:
                 continue
-
             try:
                 rid = int(float(parts[0]))
                 rtype = int(float(parts[1]))
@@ -263,18 +137,8 @@ def _parse_swc(path: Path) -> tuple[list[str], list[dict[str, Any]]]:
                 parent = int(float(parts[6]))
             except Exception:
                 continue
-
-            rows.append(
-                {
-                    "id": rid,
-                    "type": rtype,
-                    "x": x,
-                    "y": y,
-                    "z": z,
-                    "radius": radius,
-                    "parent": parent,
-                }
-            )
+            rows.append({"id": rid, "type": rtype, "x": x, "y": y, "z": z,
+                         "radius": radius, "parent": parent})
     return headers, rows
 
 
@@ -299,48 +163,29 @@ def _write_swc(
 def _check_auto_label_eligibility(rows: list[dict[str, Any]]) -> str | None:
     """Fast pre-flight check on parsed SWC rows.
 
-    Auto-label assumes the file describes one cell. The only case
-    that produces garbage labels and warrants a hard skip is
-    *multi-soma* files (multiple disconnected type-1 components in a
-    single SWC) — those need to be split into one cell per file
-    first. Soma-less and soma-only files are accepted: the engine's
-    proxy-root fallback picks the largest-radius root when there's
-    no explicit soma, and a soma-only file simply produces an
-    all-soma labeling, which is correct.
-
-    Returns:
-        ``None`` when the file is eligible, or a short
-        human-readable reason when it is not.
+    Auto-labeling assumes the file describes one cell. A file with several
+    disconnected groups of soma nodes holds several cells and needs splitting
+    first. Returns ``None`` when the file is eligible, or a short reason.
     """
     if not rows:
         return "no valid SWC rows"
-
     soma_indices = [i for i, r in enumerate(rows) if int(r["type"]) == 1]
     if len(soma_indices) <= 1:
-        return None  # 0 somas (proxy-root path) or 1 soma — both fine
-
-    # Multi-soma detection. Two soma nodes are part of the same soma
-    # only if they are directly connected (parent <-> child) or
-    # transitively connected through soma-only edges. Build that
-    # connectivity over soma nodes, count components.
+        return None
     id_to_idx = {int(r["id"]): i for i, r in enumerate(rows)}
     soma_set = set(soma_indices)
     parent_idx_of = [id_to_idx.get(int(r["parent"])) for r in rows]
-
-    # Adjacency restricted to soma-soma edges.
     soma_adj: dict[int, set[int]] = {i: set() for i in soma_indices}
     for child in soma_indices:
         p = parent_idx_of[child]
         if p in soma_set:
             soma_adj[child].add(p)
             soma_adj[p].add(child)
-
     seen: set[int] = set()
     components = 0
     for start in soma_indices:
         if start in seen:
             continue
-        # BFS over soma-restricted adjacency.
         stack = [start]
         while stack:
             cur = stack.pop()
@@ -350,11 +195,8 @@ def _check_auto_label_eligibility(rows: list[dict[str, Any]]) -> str | None:
             stack.extend(n for n in soma_adj[cur] if n not in seen)
         components += 1
     if components > 1:
-        return (
-            f"multi-soma file ({components} disconnected soma groups); "
-            "split with `batch split` before auto-labeling"
-        )
-
+        return (f"multi-soma file ({components} disconnected soma groups); "
+                "split with `batch split` before auto-labeling")
     return None
 
 
@@ -371,273 +213,327 @@ def _build_change_details(
     radius_changes = sum(1 for old, new in zip(orig_radii, new_radii) if float(old) != float(new))
     if type_changes <= 0 and radius_changes <= 0:
         return out
-
     out.append(f"[{file_name}]")
     if type_changes > 0:
         out.append("type_changes:")
         for row, old_t, new_t in zip(rows, orig_types, new_types):
             if int(old_t) != int(new_t):
-                out.append(
-                    f"  node_id={int(row['id'])}: old_type={int(old_t)} -> new_type={int(new_t)}"
-                )
+                out.append(f"  node_id={int(row['id'])}: old_type={int(old_t)} -> new_type={int(new_t)}")
     if radius_changes > 0:
         out.append("radius_changes:")
         for row, old_r, new_r in zip(rows, orig_radii, new_radii):
             if float(old_r) != float(new_r):
-                out.append(
-                    f"  node_id={int(row['id'])}: "
-                    f"old_radius={float(old_r):.10g} -> new_radius={float(new_r):.10g}"
-                )
+                out.append(f"  node_id={int(row['id'])}: "
+                           f"old_radius={float(old_r):.10g} -> new_radius={float(new_r):.10g}")
     out.append("")
     return out
 
 
 # ---------------------------------------------------------------------------
-# Conversion: parsed SWC rows <-> pipeline SWCNode list
+# Labeling
 # ---------------------------------------------------------------------------
 
 
-def _rows_to_swc_nodes(rows: list[dict[str, Any]]) -> list:
-    from .features import SWCNode  # noqa: PLC0415
-
-    return [
-        SWCNode(
-            id=int(row["id"]),
-            type=int(row["type"]),
-            x=float(row["x"]),
-            y=float(row["y"]),
-            z=float(row["z"]),
-            radius=float(row["radius"]),
-            parent=int(row["parent"]),
-        )
-        for row in rows
-    ]
+@dataclass
+class _Labeled:
+    """One file run through the labeler, before the user's label options apply."""
+    labels: list[int]               # the labeler's type for each SWC row
+    cell_type: str                  # class used for labeling: "pyramidal" or "interneuron"
+    cell_type_source: str           # "user" or "stage1"
+    stage1_cell_type: str           # Stage 1's own prediction
+    stage1_confidence: float
+    class_mismatch: bool
+    qc_result: dict[str, Any]
+    notes: list[str]
+    flag_result: dict[str, Any] | None
 
 
-def _normalize_cell_type(raw: str | None) -> str | None:
-    value = str(raw or "").strip().lower()
-    if value in {"", "unknown", "auto", "stage1", "none"}:
-        return None
-    if value in {"pyramidal", "interneuron"}:
-        return value
-    raise ValueError("cell_type must be one of: unknown, pyramidal, interneuron")
+_FLAG_CACHE: dict[str, Any] = {}
 
 
-def _normalize_flag_feature_mode(raw: str | None) -> str:
-    value = str(raw or "compact").strip().lower().replace("-", "_")
-    if value in {"", "default", "compact", "simple", "auto", "baseline", "complex"}:
-        return "compact"
-    raise ValueError("flag_feature_mode must be compact/simple")
-
-
-def _compact_flag_model_for_cell_type(model_dir: str | None, cell_type: str | None) -> Path | None:
-    if cell_type == "pyramidal":
-        return (
-            resolve_model_path("flag_pyramidal", override=model_dir, auto_download=False)
-            or resolve_model_path("flag_all", override=model_dir, auto_download=False)
-        )
-    if cell_type == "interneuron":
-        return (
-            resolve_model_path("flag_interneuron", override=model_dir, auto_download=False)
-            or resolve_model_path("flag_all", override=model_dir, auto_download=False)
-        )
-    return resolve_model_path("flag_all", override=model_dir, auto_download=False)
-
-
-def _flag_model_for_cell_type(
-    model_dir: str | None,
-    cell_type: str | None,
-    feature_mode: str | None,
-) -> tuple[Path | None, str]:
-    _normalize_flag_feature_mode(feature_mode)
-    return _compact_flag_model_for_cell_type(model_dir, cell_type), "compact"
-
-
-def _score_flag_for_pipeline_result(
-    *,
-    in_path: Path,
-    rows: list[dict[str, Any]],
-    opts: BatchOptions,
-    model_dir: str | None,
-    stage1_path: Path,
-    stage2_path: Path,
-    gnn_state: Any | None,
-    pipeline_result: Any,
-    cell_type: str | None,
-    stage1_conf: float | None,
-    use_subtree_stage2: bool,
-) -> dict[str, Any] | None:
-    if not bool(getattr(opts, "flag_enabled", True)) or pipeline_result is None:
-        return None
-
-    requested_mode = _normalize_flag_feature_mode(getattr(opts, "flag_feature_mode", "compact"))
-    flag_path, actual_mode = _flag_model_for_cell_type(model_dir, cell_type, requested_mode)
-    if flag_path is None:
-        return None
-
+def _load_flag(folder: Path) -> Any | None:
+    """The folder's flag bundle, loaded once per file state; ``None`` without one."""
+    path = folder / MODEL_FILES["flag"]
     try:
-        from .flagging import build_feature_row, score_flag  # noqa: PLC0415
-        from .pipeline import run_pipeline_on_nodes  # noqa: PLC0415
-
-        nodes_for_flag = _rows_to_swc_nodes(rows)
-        base_result = None
-        if cell_type == "pyramidal":
-            base_result = run_pipeline_on_nodes(
-                nodes_for_flag,
-                file_path="",
-                stage1_model=stage1_path,
-                stage2_model=stage2_path,
-                gnn_state=gnn_state,
-                branch3_state=None,
-                use_subtree_stage2=use_subtree_stage2,
-                override_cell_type=_normalize_cell_type(getattr(opts, "cell_type", None)),
-            )
-        feature_row = build_feature_row(
-            file_name=in_path.name,
-            nodes=nodes_for_flag,
-            labels=list(pipeline_result.node_labels),
-            confidences=[float(c) for c in pipeline_result.node_confidences],
-            stage1_cell_type=str(cell_type or ""),
-            stage1_confidence=float(stage1_conf if stage1_conf is not None else 0.0),
-            base_labels=list(base_result.node_labels) if base_result is not None else None,
-            base_confidences=(
-                [float(c) for c in base_result.node_confidences]
-                if base_result is not None else None
-            ),
-        )
-        out = score_flag(
-            flag_model_path=flag_path,
-            feature_row=feature_row,
-            cell_type_for_filter=str(cell_type or ""),
-            strictness=float(getattr(opts, "flag_strictness", 0.5)),
-        )
-        out["requested_feature_mode"] = requested_mode
-        out["actual_feature_mode"] = actual_mode
-        return out
-    except Exception as exc:  # noqa: BLE001
-        return {
-            "enabled": True,
-            "flagged": False,
-            "requested_feature_mode": requested_mode,
-            "actual_feature_mode": actual_mode,
-            "error": f"{exc.__class__.__name__}: {exc}",
-        }
+        st = path.stat()
+        key = f"{path.resolve()}|{st.st_mtime_ns}|{st.st_size}"
+    except OSError:
+        key = f"{path.resolve()}|missing"
+    if key not in _FLAG_CACHE:
+        from swcstudio.core.labeler.stage4.single_seed_flag import load_flag  # noqa: PLC0415
+        with labeler_pickle_aliases():
+            _FLAG_CACHE[key] = load_flag(folder)
+    return _FLAG_CACHE[key]
 
 
-def _apply_pipeline_to_rows(
-    rows: list[dict[str, Any]],
-    *,
-    opts: BatchOptions,
-    stage1_path: Path,
-    stage2_path: Path,
-    gnn_state: Any | None,
-    branch3_state: Any | None,
-    use_subtree_stage2: bool,
-) -> tuple[list[int], list[float], int, int, Any | None]:
-    """Run the pipeline on parsed SWC rows. Returns
-    ``(types, radii, type_changes, radius_changes, pipeline_result)``.
+def _score_flag(nodes: list, result: Any, folder: Path, labeled_class: str,
+                stage1: Any, mismatch: bool) -> dict[str, Any]:
+    """The per-file flag record. ``flagged`` here is the single-file decision."""
+    base: dict[str, Any] = {
+        "enabled": True, "cell_type": labeled_class, "stage1_cell_type": stage1.cell_type,
+        "stage1_confidence": float(stage1.confidence), "suspicion": None, "predicted_f1": None,
+        "threshold": None, "flagged": False, "flagged_by_threshold": False, "reason": None,
+    }
+    if mismatch:
+        # The flag reads Stage 1's prediction among its inputs; for a cell whose
+        # chosen class Stage 1 disputes it was never trained or measured, so the
+        # disagreement itself is the reason to review the cell.
+        base.update(flagged=True, reason="class_mismatch")
+        return base
+    flag = _load_flag(folder)
+    if flag is None:
+        base.update(enabled=False, reason="no_flag_model")
+        return base
+    from swcstudio.core.labeler.stage4.single_seed_flag import score_flag  # noqa: PLC0415
+    with labeler_pickle_aliases():
+        scored = score_flag(nodes, result, flag)
+    if scored.get("out_of_scope"):
+        base.update(enabled=False, reason="no_flag_for_class")
+        return base
+    flagged = bool(scored.get("flagged"))
+    # The flag regresses per-cell F1 and can overshoot [0, 1] slightly; the
+    # suspicion score is clipped the same way.
+    predicted_f1 = min(max(float(scored["predicted_f1"]), 0.0), 1.0)
+    base.update(suspicion=float(scored["suspicion"]), predicted_f1=predicted_f1,
+                threshold=float(scored["threshold"]), flagged=flagged, flagged_by_threshold=flagged,
+                reason="below_cutoff" if flagged else None)
+    return base
 
-    The ``opts`` flags map onto the pipeline like this:
 
-        opts.soma   - soma is detected by Stage 1 and assigned via the
-                      proxy-soma rule. The flag controls whether we
-                      *write* the predicted soma label (default True).
-        opts.axon, opts.basal, opts.apic
-                    - per-cell-type label gates. When the pipeline
-                      predicts an axon for an interneuron and the user
-                      has disabled axon, the original label is kept.
-        opts.rad    - radius cleanup. The pipeline does not modify radii
-                      itself; we apply the simple "copy parent radius
-                      if zero" rule when the flag is set.
+def _label_file(path: Path, rows: list[dict[str, Any]], opts: BatchOptions, folder: Path) -> _Labeled:
+    """Run the labeler on ``path`` and match its labels to the parsed ``rows``.
+
+    The labeler parses the file itself; that parse merges a soma drawn with
+    several points into one node and keeps every other node's id, so labels are
+    matched to rows by id and the merged soma points are labeled soma, exactly
+    as the labeler writes a labeled file.
     """
-    from .pipeline import run_pipeline_on_nodes  # noqa: PLC0415
+    from swcstudio.core.labeler.infer_pipeline import parse_swc_for_labeling, run_pipeline_on_nodes  # noqa: PLC0415
+    from swcstudio.core.labeler.qc import qc_violations  # noqa: PLC0415
+    from swcstudio.core.labeler.stage1.cell_type_detector import detect_cell_type_from_nodes  # noqa: PLC0415
 
-    nodes = _rows_to_swc_nodes(rows)
-    if not nodes:
-        return (
-            [int(r["type"]) for r in rows],
-            [float(r["radius"]) for r in rows],
-            0,
-            0,
-            None,
-        )
+    s1_path = folder / MODEL_FILES["stage1"]
+    s2_path = folder / MODEL_FILES["stage2"]
+    nodes, notes = parse_swc_for_labeling(path)
+    reasons = qc_violations(nodes)
+    qc_result = {"passed": not reasons, "reasons": list(reasons), "n_nodes": len(nodes)}
+    if reasons:
+        raise ValueError(f"{path.name}: QC rejected; " + "; ".join(reasons))
 
-    cell_type_override = _normalize_cell_type(getattr(opts, "cell_type", None))
-    result = run_pipeline_on_nodes(
-        nodes,
-        file_path="",
-        stage1_model=stage1_path,
-        stage2_model=stage2_path,
-        gnn_state=gnn_state,
-        branch3_state=branch3_state,
-        use_subtree_stage2=use_subtree_stage2,
-        override_cell_type=cell_type_override,
-    )
-    pipeline_types = list(result.node_labels)
-
-    orig_types = [int(r["type"]) for r in rows]
-    final_types: list[int] = []
-    enabled_neurites: set[int] = set()
-    if opts.axon:
-        enabled_neurites.add(2)
-    if opts.basal:
-        enabled_neurites.add(3)
-    if opts.apic:
-        enabled_neurites.add(4)
-
-    for old_t, new_t in zip(orig_types, pipeline_types):
-        new_t = int(new_t)
-        if new_t == 1:
-            final_types.append(1 if opts.soma else int(old_t))
-        elif new_t in {2, 3, 4}:
-            if not enabled_neurites:
-                final_types.append(int(old_t))
-            elif new_t in enabled_neurites:
-                final_types.append(new_t)
-            else:
-                final_types.append(int(old_t))
+    chosen = normalize_cell_class(getattr(opts, "cell_type", None))
+    with labeler_pickle_aliases():
+        if chosen is None:
+            result = run_pipeline_on_nodes(nodes, str(path), s1_path, s2_path)
+            stage1 = result.stage1
+            mismatch = False
         else:
-            final_types.append(int(old_t))
+            stage1 = detect_cell_type_from_nodes(nodes, s1_path)
+            mismatch = stage1.cell_type != chosen
+            # When Stage 1 agrees, the run is the labeler's own, Stage 1 included,
+            # so the flag sees exactly the inputs it was trained and measured on.
+            result = run_pipeline_on_nodes(nodes, str(path), s1_path, s2_path,
+                                           override_cell_type=chosen if mismatch else None)
+    labeled_class = chosen if chosen is not None else result.stage1.cell_type
+
+    label_by_id = {int(nd.id): int(lbl) for nd, lbl in zip(nodes, result.node_labels)}
+    if len(label_by_id) != len(nodes):
+        raise ValueError(f"{path.name}: node ids are not unique, so labels cannot be matched to rows")
+    row_ids = [int(r["id"]) for r in rows]
+    if not set(label_by_id) <= set(row_ids):
+        raise ValueError(f"{path.name}: the file's node rows do not match the labeled parse")
+    labels = [label_by_id.get(rid, 1) for rid in row_ids]
+
+    flag_result = None
+    if bool(getattr(opts, "flag_enabled", True)):
+        flag_result = _score_flag(nodes, result, folder, labeled_class, stage1, mismatch)
+
+    return _Labeled(
+        labels=labels, cell_type=labeled_class,
+        cell_type_source="user" if chosen is not None else "stage1",
+        stage1_cell_type=stage1.cell_type, stage1_confidence=float(stage1.confidence),
+        class_mismatch=mismatch, qc_result=qc_result, notes=list(notes), flag_result=flag_result,
+    )
+
+
+def _apply_options(rows: list[dict[str, Any]], labels: list[int], opts: BatchOptions
+                   ) -> tuple[list[int], list[float], int, int]:
+    """The user's label options and radius cleanup on top of the labeler's labels.
+
+    ``opts.soma`` / ``axon`` / ``basal`` / ``apic`` choose which predicted labels
+    are written; a switched-off label keeps the node's original type.
+    ``opts.rad`` copies the parent's radius onto nodes whose radius is not positive.
+    """
+    orig_types = [int(r["type"]) for r in rows]
+    enabled = {t for t, on in ((2, opts.axon), (3, opts.basal), (4, opts.apic)) if on}
+    final_types: list[int] = []
+    for old_t, new_t in zip(orig_types, labels):
+        if new_t == 1:
+            final_types.append(1 if opts.soma else old_t)
+        elif new_t in (2, 3, 4) and new_t in enabled:
+            final_types.append(new_t)
+        else:
+            final_types.append(old_t)
 
     radii_orig = [float(r["radius"]) for r in rows]
     radii = list(radii_orig)
     if opts.rad:
         id_to_idx = {int(r["id"]): i for i, r in enumerate(rows)}
-        order: list[int] = []
-        seen: set[int] = set()
-        roots = [
-            i for i, r in enumerate(rows)
-            if int(r["parent"]) == -1 or int(r["parent"]) not in id_to_idx
-        ]
-        queue = list(roots)
+        children: dict[int, list[int]] = {}
+        roots = []
+        for i, r in enumerate(rows):
+            p = id_to_idx.get(int(r["parent"]))
+            if p is None:
+                roots.append(i)
+            else:
+                children.setdefault(p, []).append(i)
+        order, seen, queue = [], set(), list(roots)
         while queue:
             idx = queue.pop(0)
             if idx in seen:
                 continue
             seen.add(idx)
             order.append(idx)
-            for j, r in enumerate(rows):
-                if id_to_idx.get(int(r["parent"])) == idx and j not in seen:
-                    queue.append(j)
+            queue.extend(j for j in children.get(idx, []) if j not in seen)
         for idx in order:
             pidx = id_to_idx.get(int(rows[idx]["parent"]))
-            if pidx is None:
-                continue
-            if radii[idx] <= 0 and radii[pidx] > 0:
+            if pidx is not None and radii[idx] <= 0 and radii[pidx] > 0:
                 radii[idx] = radii[pidx]
 
-    type_changes = sum(
-        1 for old, new in zip(orig_types, final_types) if int(old) != int(new)
-    )
-    radius_changes = sum(
-        1 for old, new in zip(radii_orig, radii) if float(old) != float(new)
-    )
-    return final_types, radii, type_changes, radius_changes, result
+    type_changes = sum(1 for old, new in zip(orig_types, final_types) if old != new)
+    radius_changes = sum(1 for old, new in zip(radii_orig, radii) if old != new)
+    return final_types, radii, type_changes, radius_changes
+
+
+def _out_counts(types: list[int]) -> dict[int, int]:
+    return {t: sum(1 for x in types if int(x) == t) for t in (1, 2, 3, 4)}
+
+
+def _flag_summary(flag_result: dict[str, Any] | None) -> str:
+    if not flag_result or not flag_result.get("enabled", True) and not flag_result.get("flagged"):
+        return "flag=off" if not flag_result else f"flag=not scored ({flag_result.get('reason')})"
+    f1 = flag_result.get("predicted_f1")
+    f1_txt = f", predicted_f1={f1:.3f}" if isinstance(f1, float) else ""
+    reason = flag_result.get("reason")
+    return f"flag={bool(flag_result.get('flagged'))}{f1_txt}" + (f" ({reason})" if reason else "")
+
+
+# ---------------------------------------------------------------------------
+# Flag review records (batch)
+# ---------------------------------------------------------------------------
+
+
+def flag_record(path: Path, out_path: Path | None, labeled: Any | None,
+                nodes_total: int, type_changes: int, qc_reasons: list[str] | None = None,
+                error: str | None = None) -> dict[str, Any]:
+    """One row of a batch's flag review.
+
+    ``labeled`` is a :class:`FileResult` (or the runner's internal equivalent) for
+    a labeled file, or ``None`` for a file that was not labeled, with
+    ``qc_reasons`` or ``error`` saying why.
+    """
+    rec: dict[str, Any] = {
+        "file": path.name, "input_path": str(path),
+        "output_path": str(out_path) if out_path is not None else None,
+        "labeled": labeled is not None, "nodes": nodes_total, "type_changes": type_changes,
+        "qc_passed": qc_reasons is None and error is None, "qc_reasons": list(qc_reasons or []),
+        "error": error, "review_status": "unreviewed",
+        "cell_type": None, "cell_class": None, "cell_class_source": None,
+        "stage1_cell_type": None, "stage1_confidence": None, "class_mismatch": False,
+        "predicted_f1": None, "suspicion": None, "threshold": None,
+        "flagged_by_threshold": False, "flagged": False, "flag_reason": None,
+        "rank_in_class": None, "class_size": None, "notes": [],
+    }
+    if labeled is not None:
+        fr = getattr(labeled, "flag_result", None) or {}
+        rec.update(
+            cell_type=labeled.cell_type, cell_class=cell_class_name(labeled.cell_type),
+            cell_class_source="user" if labeled.cell_type_source == "user" else "auto",
+            stage1_cell_type=labeled.stage1_cell_type, stage1_confidence=labeled.stage1_confidence,
+            class_mismatch=bool(labeled.class_mismatch), predicted_f1=fr.get("predicted_f1"),
+            suspicion=fr.get("suspicion"), threshold=fr.get("threshold"),
+            flagged_by_threshold=bool(fr.get("flagged_by_threshold")),
+            notes=list(getattr(labeled, "notes", []) or []),
+        )
+    return rec
+
+
+def apply_flag_budget(records: list[dict[str, Any]], budget: float) -> None:
+    """Decide ``flagged`` for each labeled record of a batch, in place.
+
+    Each cell class flags its riskiest ``budget`` share, ranked by suspicion and
+    rounded to the nearest cell, as the labeler's flag was evaluated. A class
+    with fewer than ``1 / budget`` cells has no such share, so its cells are
+    flagged by the flag's fixed cut-off instead. A class mismatch is always flagged.
+    """
+    budget = min(max(float(budget), 0.0), 1.0)
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for rec in records:
+        rec["rank_in_class"] = None
+        rec["class_size"] = None
+        if not rec.get("labeled"):
+            rec["flagged"], rec["flag_reason"] = False, None
+        elif rec.get("class_mismatch"):
+            rec["flagged"], rec["flag_reason"] = True, "class_mismatch"
+        elif rec.get("suspicion") is None:
+            rec["flagged"], rec["flag_reason"] = False, None
+        else:
+            groups.setdefault(str(rec["cell_type"]), []).append(rec)
+    for group in groups.values():
+        ranked = sorted(group, key=lambda r: float(r["suspicion"]), reverse=True)
+        n = len(ranked)
+        use_share = budget > 0 and n >= math.ceil(1.0 / budget)
+        k = int(math.floor(budget * n + 0.5)) if use_share else 0
+        for i, rec in enumerate(ranked):
+            rec["rank_in_class"], rec["class_size"] = i + 1, n
+            if use_share:
+                rec["flagged"] = i < k
+                rec["flag_reason"] = "riskiest_share" if i < k else None
+            else:
+                rec["flagged"] = bool(rec.get("flagged_by_threshold"))
+                rec["flag_reason"] = "below_cutoff" if rec["flagged"] else None
+
+
+_CSV_FIELDS = ("file", "flagged", "flag_reason", "cell_class", "cell_class_source", "stage1_cell_type",
+               "stage1_confidence", "class_mismatch", "predicted_f1", "suspicion", "rank_in_class",
+               "class_size", "nodes", "type_changes", "labeled", "qc_passed", "qc_reasons", "error",
+               "review_status", "input_path", "output_path")
+
+
+def write_flag_review(json_path: Path, records: list[dict[str, Any]], *, budget: float,
+                      folder: str, timestamp: str, labeler_version: str | None = None) -> Path:
+    """Write a batch's flag review: ``json_path`` (read by the Flag Review window)
+    and a CSV copy beside it with the same name. ``labeler_version`` defaults to
+    the labeler SWC-Studio runs; a review saved again keeps the one it was made with."""
+    payload = {
+        "kind": "swcstudio_flag_review", "version": 1, "folder": folder, "timestamp": timestamp,
+        "labeler_version": labeler_version or labeler_info()["version"], "flag_budget": budget,
+        "records": records,
+    }
+    json_path = Path(json_path)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    with json_path.with_suffix(".csv").open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=_CSV_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        for rec in records:
+            row = dict(rec)
+            row["qc_reasons"] = "; ".join(rec.get("qc_reasons") or [])
+            writer.writerow(row)
+    return json_path
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+def _model_folder(model_dir: str | None) -> Path:
+    ok, reason = is_available(model_dir=model_dir)
+    if not ok:
+        raise FileNotFoundError(reason)
+    folder = resolve_model_dir(model_dir)
+    assert folder is not None
+    return folder
 
 
 def run_file(
@@ -648,112 +544,46 @@ def run_file(
     write_output: bool = True,
     write_log: bool = True,
     model_dir: str | None = None,
-    use_subtree_stage2: bool = True,
 ) -> FileResult:
-    """Run the auto-typing engine on one SWC file."""
-    ok, reason = is_available(model_dir=model_dir)
-    if not ok:
-        raise FileNotFoundError(reason)
-
-    stage1_path = resolve_model_path("stage1", override=model_dir)
-    stage2_path = resolve_model_path("stage2", override=model_dir)
-    gnn_state = _load_gnn_state(model_dir)
-    branch3_state = _load_branch3_state(model_dir)
-    qc_gate = _load_qc_gate(model_dir)
-
+    """Run the auto-labeler on one SWC file."""
+    folder = _model_folder(model_dir)
     in_path = Path(file_path)
     headers, rows = _parse_swc(in_path)
     ineligible = _check_auto_label_eligibility(rows)
     if ineligible is not None:
         raise ValueError(f"{in_path.name}: {ineligible}")
-    qc_result = None
-    if qc_gate is not None:
-        try:
-            qc_result = _public_qc_result(qc_gate.evaluate(in_path))
-        except Exception as exc:  # noqa: BLE001
-            qc_result = {"passed": False, "reasons": [f"qc_error:{exc}"], "path": str(in_path)}
-    qc_reasons = _qc_failure_reasons(qc_result)
-    if qc_reasons:
-        raise ValueError(f"{in_path.name}: QC rejected; " + "; ".join(qc_reasons))
+    labeled = _label_file(in_path, rows, opts, folder)
 
     orig_types = [int(r["type"]) for r in rows]
     orig_radii = [float(r["radius"]) for r in rows]
-    types, radii, type_changes, radius_changes, pipeline_result = _apply_pipeline_to_rows(
-        rows,
-        opts=opts,
-        stage1_path=stage1_path,
-        stage2_path=stage2_path,
-        gnn_state=gnn_state,
-        branch3_state=branch3_state,
-        use_subtree_stage2=use_subtree_stage2,
-    )
-    cell_type = getattr(getattr(pipeline_result, "stage1", None), "cell_type", None)
-    stage1_conf = getattr(getattr(pipeline_result, "stage1", None), "confidence", None)
-    cell_type_source = "user" if _normalize_cell_type(getattr(opts, "cell_type", None)) else "stage1"
-
-    flag_result = _score_flag_for_pipeline_result(
-        in_path=in_path,
-        rows=rows,
-        opts=opts,
-        model_dir=model_dir,
-        stage1_path=stage1_path,
-        stage2_path=stage2_path,
-        gnn_state=gnn_state,
-        pipeline_result=pipeline_result,
-        cell_type=cell_type,
-        stage1_conf=stage1_conf,
-        use_subtree_stage2=use_subtree_stage2,
-    )
+    types, radii, type_changes, radius_changes = _apply_options(rows, labeled.labels, opts)
 
     out_path: Path | None = None
     run_timestamp = timestamp_slug()
     if write_output:
-        out_path = (
-            Path(output_path)
-            if output_path
-            else operation_output_path_for_file(in_path, "auto_typing", timestamp=run_timestamp)
-        )
+        out_path = (Path(output_path) if output_path
+                    else operation_output_path_for_file(in_path, "auto_typing", timestamp=run_timestamp))
         _write_swc(out_path, headers, rows, types, radii)
 
-    out_counts = {
-        1: sum(1 for t in types if int(t) == 1),
-        2: sum(1 for t in types if int(t) == 2),
-        3: sum(1 for t in types if int(t) == 3),
-        4: sum(1 for t in types if int(t) == 4),
-    }
-    change_details = _build_change_details(
-        in_path.name,
-        rows,
-        orig_types,
-        types,
-        orig_radii,
-        radii,
-    )
+    out_counts = _out_counts(types)
+    change_details = _build_change_details(in_path.name, rows, orig_types, types, orig_radii, radii)
+    flagged = bool(labeled.flag_result and labeled.flag_result.get("flagged"))
 
     log_path: str | None = None
     if write_log:
-        log_target = (
-            auto_typing_log_path_for_file(in_path)
-            if output_path
-            else operation_report_path_for_file(in_path, "auto_typing", timestamp=run_timestamp)
-        )
+        log_target = (auto_typing_log_path_for_file(in_path) if output_path
+                      else operation_report_path_for_file(in_path, "auto_typing", timestamp=run_timestamp))
         payload = {
             "folder": str(in_path.parent),
             "out_dir": str(out_path.parent if out_path is not None else in_path.parent),
-            "zip_path": None,
-            "files_total": 1,
-            "files_processed": 1,
-            "files_failed": 0,
-            "files_qc_failed": 0,
-            "total_nodes": len(rows),
-            "total_type_changes": type_changes,
-            "total_radius_changes": radius_changes,
-            "files_flagged": int(bool(flag_result and flag_result.get("flagged"))),
-            "failures": [],
+            "zip_path": None, "files_total": 1, "files_processed": 1, "files_failed": 0,
+            "files_qc_failed": 0, "total_nodes": len(rows), "total_type_changes": type_changes,
+            "total_radius_changes": radius_changes, "files_flagged": int(flagged), "failures": [],
             "per_file": [
                 f"{in_path.name}: nodes={len(rows)}, type_changes={type_changes}, "
-                f"radius_changes={radius_changes}, cell_type={cell_type or 'unknown'} "
-                f"({cell_type_source}), flag={bool(flag_result and flag_result.get('flagged'))}, "
+                f"radius_changes={radius_changes}, cell_class={cell_class_name(labeled.cell_type)} "
+                f"({'user' if labeled.cell_type_source == 'user' else 'auto'}), "
+                f"{_flag_summary(labeled.flag_result)}, "
                 f"out_types(soma/axon/basal/apic)={out_counts[1]}/{out_counts[2]}/"
                 f"{out_counts[3]}/{out_counts[4]}"
             ],
@@ -768,11 +598,11 @@ def run_file(
         type_changes=type_changes,
         radius_changes=radius_changes,
         out_type_counts=out_counts,
-        cell_type=cell_type,
-        cell_type_source=cell_type_source,
-        stage1_confidence=float(stage1_conf) if stage1_conf is not None else None,
-        qc_result=qc_result,
-        flag_result=flag_result,
+        cell_type=labeled.cell_type,
+        cell_type_source=labeled.cell_type_source,
+        stage1_confidence=labeled.stage1_confidence,
+        qc_result=labeled.qc_result,
+        flag_result=labeled.flag_result,
         failures=[],
         change_details=change_details,
         log_path=log_path,
@@ -780,6 +610,10 @@ def run_file(
         rows=rows,
         types=types,
         radii=radii,
+        stage1_cell_type=labeled.stage1_cell_type,
+        class_mismatch=labeled.class_mismatch,
+        notes=labeled.notes,
+        labeler_version=labeler_info()["version"],
     )
 
 
@@ -788,136 +622,86 @@ def run_batch(
     opts: BatchOptions,
     *,
     model_dir: str | None = None,
-    use_subtree_stage2: bool = True,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> BatchResult:
-    """Run the auto-typing engine on every ``.swc`` file in ``folder``.
+    """Run the auto-labeler on every ``.swc`` file in ``folder``.
 
-    ``progress_callback`` is invoked once per file *before* processing
-    that file: ``progress_callback(index, total, current_filename)``.
-    Use it to drive a GUI progress bar without blocking the engine.
-    Exceptions raised inside the callback are propagated to the caller.
+    Labeled copies go to a new output folder created inside ``folder``
+    (``<folder>_batch_auto_typing_<timestamp>``), together with a text report and
+    the flag review (``flag_review.json`` / ``.csv``); the source files are not
+    changed.
+    ``progress_callback(index, total, current_filename)`` is invoked once per
+    file before processing it.
     """
-    ok, reason = is_available(model_dir=model_dir)
-    if not ok:
-        raise FileNotFoundError(reason)
-
-    stage1_path = resolve_model_path("stage1", override=model_dir)
-    stage2_path = resolve_model_path("stage2", override=model_dir)
-    gnn_state = _load_gnn_state(model_dir)
-    branch3_state = _load_branch3_state(model_dir)
-    qc_gate = _load_qc_gate(model_dir)
-
+    model_folder = _model_folder(model_dir)
     in_dir = Path(folder)
-    swc_files = sorted([
-        p for p in in_dir.iterdir()
-        if p.is_file() and p.suffix.lower() == ".swc"
-    ])
-
+    swc_files = sorted(p for p in in_dir.iterdir() if p.is_file() and p.suffix.lower() == ".swc")
     run_timestamp = timestamp_slug()
-    out_dir = operation_output_dir_for_folder(
-        in_dir, "batch_auto_typing", timestamp=run_timestamp,
-    )
+    out_dir = operation_output_dir_for_folder(in_dir, "batch_auto_typing", timestamp=run_timestamp)
 
     failures: list[str] = []
     per_file: list[str] = []
     change_details: list[str] = []
-
-    processed = 0
-    total_nodes = 0
-    total_type_changes = 0
-    total_radius_changes = 0
-    total_files = len(swc_files)
-    files_flagged = 0
-    files_qc_failed = 0
+    records: list[dict[str, Any]] = []
+    processed = total_nodes = total_type_changes = total_radius_changes = files_qc_failed = 0
 
     for idx, swc_path in enumerate(swc_files):
         if progress_callback is not None:
-            progress_callback(idx, total_files, swc_path.name)
+            progress_callback(idx, len(swc_files), swc_path.name)
         try:
             headers, rows = _parse_swc(swc_path)
             ineligible = _check_auto_label_eligibility(rows)
             if ineligible is not None:
                 failures.append(f"{swc_path.name}: skipped — {ineligible}")
+                records.append(flag_record(swc_path, None, None, len(rows), 0, error=ineligible))
                 continue
-            qc_result = None
-            if qc_gate is not None:
-                try:
-                    qc_result = _public_qc_result(qc_gate.evaluate(swc_path))
-                except Exception as exc:  # noqa: BLE001
-                    qc_result = {"passed": False, "reasons": [f"qc_error:{exc}"], "path": str(swc_path)}
-            qc_reasons = _qc_failure_reasons(qc_result)
-            if qc_reasons:
+            try:
+                labeled = _label_file(swc_path, rows, opts, model_folder)
+            except ValueError as exc:
+                if "QC rejected" not in str(exc):
+                    raise
                 files_qc_failed += 1
-                per_file.append(
-                    f"{swc_path.name}: QC rejected; skipped auto-labeling; "
-                    f"reasons={'; '.join(qc_reasons)}"
-                )
+                reasons = str(exc).split("QC rejected; ", 1)[-1].split("; ")
+                per_file.append(f"{swc_path.name}: QC rejected; skipped auto-labeling; "
+                                f"reasons={'; '.join(reasons)}")
+                records.append(flag_record(swc_path, None, None, len(rows), 0, qc_reasons=reasons))
                 continue
 
             orig_types = [int(r["type"]) for r in rows]
             orig_radii = [float(r["radius"]) for r in rows]
-            types, radii, type_changes, radius_changes, pipeline_result = _apply_pipeline_to_rows(
-                rows,
-                opts=opts,
-                stage1_path=stage1_path,
-                stage2_path=stage2_path,
-                gnn_state=gnn_state,
-                branch3_state=branch3_state,
-                use_subtree_stage2=use_subtree_stage2,
-            )
-            out_path = operation_output_path_for_file(
-                swc_path,
-                "batch_auto_typing",
-                output_dir=out_dir,
-                timestamp=run_timestamp,
-            )
+            types, radii, type_changes, radius_changes = _apply_options(rows, labeled.labels, opts)
+            out_path = operation_output_path_for_file(swc_path, "batch_auto_typing", output_dir=out_dir,
+                                                      timestamp=run_timestamp)
             _write_swc(out_path, headers, rows, types, radii)
 
             processed += 1
             total_nodes += len(rows)
             total_type_changes += type_changes
             total_radius_changes += radius_changes
-            cell_type = getattr(getattr(pipeline_result, "stage1", None), "cell_type", None)
-            stage1_conf = getattr(getattr(pipeline_result, "stage1", None), "confidence", None)
-            cell_type_source = "user" if _normalize_cell_type(getattr(opts, "cell_type", None)) else "stage1"
-            flag_result = _score_flag_for_pipeline_result(
-                in_path=swc_path,
-                rows=rows,
-                opts=opts,
-                model_dir=model_dir,
-                stage1_path=stage1_path,
-                stage2_path=stage2_path,
-                gnn_state=gnn_state,
-                pipeline_result=pipeline_result,
-                cell_type=cell_type,
-                stage1_conf=stage1_conf,
-                use_subtree_stage2=use_subtree_stage2,
-            )
-            if bool(flag_result and flag_result.get("flagged")):
-                files_flagged += 1
-            out_counts = {
-                1: sum(1 for t in types if int(t) == 1),
-                2: sum(1 for t in types if int(t) == 2),
-                3: sum(1 for t in types if int(t) == 3),
-                4: sum(1 for t in types if int(t) == 4),
-            }
+            records.append(flag_record(swc_path, out_path, labeled, len(rows), type_changes))
+            out_counts = _out_counts(types)
             per_file.append(
                 f"{swc_path.name}: nodes={len(rows)}, type_changes={type_changes}, "
-                f"radius_changes={radius_changes}, cell_type={cell_type or 'unknown'} "
-                f"({cell_type_source}), qc_pass={None if qc_result is None else qc_result.get('passed')}, "
-                f"flag={bool(flag_result and flag_result.get('flagged'))}, "
+                f"radius_changes={radius_changes}, cell_class={cell_class_name(labeled.cell_type)} "
+                f"({'user' if labeled.cell_type_source == 'user' else 'auto'}), "
+                f"{_flag_summary(labeled.flag_result)}, "
                 f"out_types(soma/axon/basal/apic)={out_counts[1]}/{out_counts[2]}/"
                 f"{out_counts[3]}/{out_counts[4]}"
             )
-
-            change_details.extend(
-                _build_change_details(
-                    swc_path.name, rows, orig_types, types, orig_radii, radii,
-                )
-            )
+            change_details.extend(_build_change_details(swc_path.name, rows, orig_types, types,
+                                                        orig_radii, radii))
         except Exception as e:  # noqa: BLE001
             failures.append(f"{swc_path.name}: {e}")
+            records.append(flag_record(swc_path, None, None, 0, 0, error=str(e)))
+
+    budget = float(getattr(opts, "flag_budget", 0.10))
+    flag_review_path: str | None = None
+    files_flagged = 0
+    if bool(getattr(opts, "flag_enabled", True)):
+        apply_flag_budget(records, budget)
+        files_flagged = sum(1 for r in records if r.get("flagged"))
+        flag_review_path = str(write_flag_review(out_dir / FLAG_REVIEW_JSON, records, budget=budget,
+                                                 folder=str(in_dir), timestamp=run_timestamp))
 
     zip_path: str | None = None
     if opts.zip_output and processed > 0:
@@ -928,43 +712,28 @@ def run_batch(
         zip_path = str(zip_target)
 
     payload = {
-        "folder": str(in_dir),
-        "out_dir": str(out_dir),
-        "zip_path": zip_path,
-        "files_total": len(swc_files),
-        "files_processed": processed,
-        "files_failed": len(failures),
-        "files_qc_failed": files_qc_failed,
-        "total_nodes": total_nodes,
-        "total_type_changes": total_type_changes,
-        "total_radius_changes": total_radius_changes,
-        "files_flagged": files_flagged,
-        "failures": failures,
-        "per_file": per_file,
+        "folder": str(in_dir), "out_dir": str(out_dir), "zip_path": zip_path,
+        "files_total": len(swc_files), "files_processed": processed, "files_failed": len(failures),
+        "files_qc_failed": files_qc_failed, "total_nodes": total_nodes,
+        "total_type_changes": total_type_changes, "total_radius_changes": total_radius_changes,
+        "files_flagged": files_flagged, "failures": failures, "per_file": per_file,
         "change_details": change_details,
     }
     log_path = write_text_report(
-        operation_report_path_for_folder(
-            in_dir, "batch_auto_typing", output_dir=out_dir, timestamp=run_timestamp,
-        ),
+        operation_report_path_for_folder(in_dir, "batch_auto_typing", output_dir=out_dir,
+                                         timestamp=run_timestamp),
         format_auto_typing_report_text(payload),
     )
 
     return BatchResult(
-        folder=str(in_dir),
-        out_dir=str(out_dir),
-        zip_path=zip_path,
-        files_total=len(swc_files),
-        files_processed=processed,
-        files_failed=len(failures),
-        files_qc_failed=files_qc_failed,
-        total_nodes=total_nodes,
-        total_type_changes=total_type_changes,
-        total_radius_changes=total_radius_changes,
-        files_flagged=files_flagged,
-        failures=failures,
-        per_file=per_file,
-        log_path=log_path,
+        folder=str(in_dir), out_dir=str(out_dir), zip_path=zip_path,
+        files_total=len(swc_files), files_processed=processed, files_failed=len(failures),
+        files_qc_failed=files_qc_failed, total_nodes=total_nodes,
+        total_type_changes=total_type_changes, total_radius_changes=total_radius_changes,
+        files_flagged=files_flagged, failures=failures, per_file=per_file, log_path=log_path,
+        flag_records=records if bool(getattr(opts, "flag_enabled", True)) else None,
+        flag_review_path=flag_review_path,
+        flag_budget=budget if bool(getattr(opts, "flag_enabled", True)) else None,
     )
 
 
@@ -973,4 +742,9 @@ __all__ = [
     "backend_status",
     "run_file",
     "run_batch",
+    "apply_flag_budget",
+    "flag_record",
+    "write_flag_review",
+    "FLAG_REVIEW_JSON",
+    "FLAG_REVIEW_CSV",
 ]

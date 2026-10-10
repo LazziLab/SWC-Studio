@@ -4,9 +4,12 @@ macOS and Windows use the same three-layer desktop design:
 
 | Layer | Contents | Update method |
 |---|---|---|
-| Runtime | Python, Qt, PyTorch, scientific libraries | Replace the full desktop bundle |
+| Runtime | Python, Qt, scientific libraries (including scikit-learn and XGBoost) | Replace the full desktop bundle |
 | Application | Plain `swcstudio/` Python source | Download a small code layer and restart |
-| Models | Auto-label model files | Download the model layer |
+| Models | The SWC auto-labeler's model folder (`labeler-<version>/`) | Download the model layer |
+
+The runtime holds no deep-learning framework; auto-labeling runs on the
+CPU.
 
 ## Runtime layout
 
@@ -18,12 +21,11 @@ app/
   swcstudio/
 models/
   VERSION
-  cell_type_classifier.pkl
-  branch_classifier.pkl
-  gnn_apical_basal.pt
-  gnn_branch3_rescue.pt
-  qc_gate.pkl
-  flag_model_*.joblib
+  labeler-1.0.0/
+    cell_type_classifier.pkl
+    branch_classifier.pkl
+    branch_correction.joblib
+    flag_model.joblib
 ```
 
 The runtime root is `Contents/Resources` on macOS and `_internal` in the
@@ -45,13 +47,16 @@ It adds the selected code root to `sys.path`, exposes the bundled model
 directory through `SWCSTUDIO_BUNDLED_MODEL_DIR`, and then imports
 `swcstudio.gui.main`.
 
-Models are resolved in this order:
+A model folder the user names (`--model-dir`, the GUI model folder
+picker, or `SWCSTUDIO_MODEL_DIR`) is the only folder searched. If it
+lacks a required file, auto-labeling stops and reports what is missing.
+Otherwise models are resolved in this order, and in each directory the
+`labeler-<version>/` folder is used:
 
-1. explicit `--model-dir`
-2. `SWCSTUDIO_MODEL_DIR`
-3. user model directory (`.../swcstudio/models`)
-4. bundled runtime model directory supplied by the bootstrap
-5. package-local `swcstudio/data/models`
+1. user model directory (`.../swcstudio/models`), where model updates
+   are installed
+2. bundled runtime model directory supplied by the bootstrap
+3. package-local `swcstudio/data/models`
 
 ## Building
 
@@ -78,7 +83,9 @@ The platform specs share dependency collection through
 ## Updates
 
 The release manifest describes separate application and model archives.
-The updater extracts them into user-writable override directories.
+The models archive holds the `labeler-<version>/` folder; the code
+archive leaves the models out. The updater extracts them into
+user-writable override directories.
 Application-layer updates are offered only when the modular bootstrap
 has marked the current process as a modular desktop bundle. Pip/source
 users update the complete package with `pip`; published wheels already

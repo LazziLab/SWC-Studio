@@ -286,18 +286,40 @@ def _print_validation_results(report: dict) -> None:
 
 
 def _print_auto_typing_guide() -> None:
+    from swcstudio.core.model_paths import labeler_info  # noqa: PLC0415
+
     print(
-        "Auto-typing engine: v12 QC-label-flag pipeline\n"
+        f"Auto-labeling: SWC auto-labeler {labeler_info()['version']}\n"
         "----------------------------------\n"
-        "Stage 1  cell-type detector (sklearn) — pyramidal vs interneuron\n"
-        "Stage 2  per-subtree classifier (sklearn) — axon / basal / apical\n"
-        "Stage 2b GraphSAGE GNN — apical-vs-basal re-decision\n"
-        "Stage 3  topology refinement\n"
+        "Stage 0  structural checks: one connected cell, a soma, finite geometry\n"
+        "Stage 1  cell class: 3-class (axon, basal, apical) or 2-class (axon, dendrite)\n"
+        "Stage 2  subtree classifier\n"
+        "Stage 3  topology rules, and the proximal branch correction for 3-class cells\n"
+        "Stage 4  quality flag: each cell's predicted per-cell F1; a batch flags\n"
+        "         the riskiest share of each cell class for review\n"
         "\n"
-        "Models are resolved via SWCSTUDIO_MODEL_DIR, --model-dir, the\n"
-        "user data directory, or the bundled package directory.\n"
-        "Run `swcstudio models status` for a full diagnostic.\n"
+        "Models are resolved via --model-dir, SWCSTUDIO_MODEL_DIR, the user data\n"
+        "directory, or the bundled package directory.\n"
+        "Run `swcstudio models status` for a full diagnostic.\n",
+        file=sys.stderr,
     )
+
+
+def _cell_class_arg(raw: str) -> str:
+    """argparse type for --cell-class: auto, 3-class or 2-class."""
+    from swcstudio.core.auto_typing import normalize_cell_class  # noqa: PLC0415
+
+    try:
+        return normalize_cell_class(raw) or "auto"
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _flag_budget_arg(raw: str) -> float:
+    value = float(raw)
+    if not 0.0 < value <= 1.0:
+        raise argparse.ArgumentTypeError("flag budget must be a share in (0, 1], e.g. 0.10")
+    return value
 
 
 def _print_simplification_rule_guide(cfg: dict | None = None) -> None:
@@ -443,15 +465,6 @@ def build_parser() -> argparse.ArgumentParser:
     check_cmd = check.add_parser("check", help="Print the GUI-style issue list for one SWC file")
     check_cmd.add_argument("file", type=Path)
     _feature_json_arg(check_cmd)
-    gpu_status = check.add_parser(
-        "gpu-status",
-        help="Check whether the active Python environment can use CUDA for SWC-Studio.",
-    )
-    gpu_status.add_argument(
-        "--json",
-        action="store_true",
-        help="Print the structured readiness report as JSON.",
-    )
     doctor = check.add_parser(
         "doctor",
         help="Verify runtime packages, bundled configuration, models, and GUI imports.",
@@ -489,7 +502,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     batch_auto = batch_sub.add_parser(
         "auto-typing",
-        help="Auto-typing on folder (v12 QC-label-flag pipeline).",
+        help="Auto-label every SWC file in a folder and rank the cells for review.",
     )
     batch_auto.add_argument("folder", type=Path)
     batch_auto.add_argument(
@@ -497,32 +510,29 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Override the directory holding the auto-typing model files "
-            "(Stage 1, Stage 2, GNN, Branch3, QC gate, and flag models)."
+            "Use the labeler model folder at this path (see `swcstudio models status`)."
         ),
     )
     batch_auto.add_argument(
-        "--cell-type",
-        choices=("unknown", "pyramidal", "interneuron"),
-        default="unknown",
-        help="Use Stage 1 when unknown; otherwise bypass Stage 1 with the supplied cell type.",
+        "--cell-class", "--cell-type",
+        dest="cell_type",
+        type=_cell_class_arg,
+        default="auto",
+        metavar="{auto,3-class,2-class}",
+        help=("Cell class: auto (Stage 1 decides, the default), 3-class (axon, basal, "
+              "apical) or 2-class (axon, dendrite). A chosen class that Stage 1 disputes "
+              "is used, and the cell is flagged as a class mismatch."),
     )
     batch_auto.add_argument(
-        "--flag-strictness",
-        type=float,
-        default=0.5,
-        help="Flag strictness from 0.0 (loose/fewer flags) to 1.0 (strict/more flags).",
-    )
-    batch_auto.add_argument(
-        "--flag-feature-mode",
-        choices=("compact", "simple"),
-        default="compact",
-        help="Flag feature source. Only the compact bundled flagger is supported.",
+        "--flag-budget",
+        type=_flag_budget_arg,
+        default=0.10,
+        help="Share of each cell class flagged for review, riskiest first (default 0.10).",
     )
     batch_auto.add_argument(
         "--no-flag",
         action="store_true",
-        help="Disable learned per-cell bad-label flag scoring.",
+        help="Do not score the quality flag.",
     )
     _feature_json_arg(batch_auto)
 
@@ -555,7 +565,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     val_auto_label = val_sub.add_parser(
         "auto-label",
-        help="Auto-label editing on one SWC file (v12 QC-label-flag pipeline).",
+        help="Auto-label one SWC file.",
     )
     val_auto_label.add_argument("file", type=Path)
     val_auto_label.add_argument(
@@ -563,32 +573,23 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Override the directory holding the auto-typing model files "
-            "(Stage 1, Stage 2, GNN, Branch3, QC gate, and flag models)."
+            "Use the labeler model folder at this path (see `swcstudio models status`)."
         ),
     )
     val_auto_label.add_argument(
-        "--cell-type",
-        choices=("unknown", "pyramidal", "interneuron"),
-        default="unknown",
-        help="Use Stage 1 when unknown; otherwise bypass Stage 1 with the supplied cell type.",
-    )
-    val_auto_label.add_argument(
-        "--flag-strictness",
-        type=float,
-        default=0.5,
-        help="Flag strictness from 0.0 (loose/fewer flags) to 1.0 (strict/more flags).",
-    )
-    val_auto_label.add_argument(
-        "--flag-feature-mode",
-        choices=("compact", "simple"),
-        default="compact",
-        help="Flag feature source. Only the compact bundled flagger is supported.",
+        "--cell-class", "--cell-type",
+        dest="cell_type",
+        type=_cell_class_arg,
+        default="auto",
+        metavar="{auto,3-class,2-class}",
+        help=("Cell class: auto (Stage 1 decides, the default), 3-class (axon, basal, "
+              "apical) or 2-class (axon, dendrite). A chosen class that Stage 1 disputes "
+              "is used, and the cell is flagged as a class mismatch."),
     )
     val_auto_label.add_argument(
         "--no-flag",
         action="store_true",
-        help="Disable learned per-cell bad-label flag scoring.",
+        help="Do not score the quality flag.",
     )
     _feature_json_arg(val_auto_label)
 
@@ -675,16 +676,16 @@ def build_parser() -> argparse.ArgumentParser:
     geom_insert.add_argument("--z", required=True, type=float)
     geom_insert.add_argument("--radius", type=float, default=None)
     geom_insert.add_argument("--type-id", type=int, default=None)
-    # ------------------------------ train (custom hybrid models)
+    # ------------------------------ train (the labeler on your own data)
     train = sub.add_parser(
         "train",
-        help="Train custom hybrid auto-typing models on your own labeled SWC dataset.",
+        help="Train the auto-labeler on your own labeled SWC files.",
     )
     train_sub = train.add_subparsers(dest="feature")
 
     train_auto = train_sub.add_parser(
         "auto-typing",
-        help="Train Stage 1 + Stage 2 + Stage 2b GNN on a labeled SWC dataset.",
+        help="Train the labeler's four stages on a labeled SWC dataset.",
     )
     train_auto.add_argument(
         "--data-dir",
@@ -696,29 +697,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir",
         type=Path,
         required=True,
-        help="Directory to write trained model files into.",
+        help="Model folder to write (use it with --model-dir).",
     )
-    train_auto.add_argument(
-        "--no-gnn",
-        action="store_true",
-        help="Skip the GNN training stage (rules + Stage 1+2 only).",
-    )
-    train_auto.add_argument("--seed", type=int, default=42)
-    train_auto.add_argument("--gnn-hidden", type=int, default=128)
-    train_auto.add_argument("--gnn-layers", type=int, default=3)
-    train_auto.add_argument("--gnn-dropout", type=float, default=0.0)
-    train_auto.add_argument("--gnn-epochs", type=int, default=200)
-    train_auto.add_argument("--gnn-patience", type=int, default=25)
+    train_auto.add_argument("--seed", type=int, default=None,
+                            help="Seed of the held-out split (random when omitted; recorded).")
+    train_auto.add_argument("--test-size", type=float, default=0.20,
+                            help="Held-out share, which the quality flag is fitted on (default 0.20).")
+    train_auto.add_argument("--device", choices=("cpu", "cuda"), default="cpu",
+                            help="Fit Stages 1 and 2 on the CPU (default) or an NVIDIA GPU.")
+    train_auto.add_argument("--skip", default="",
+                            help="Comma list of stages to leave out: stage1, stage2, correction, flag.")
 
     # ------------------------------ models (status / info)
     models = sub.add_parser(
         "models",
-        help="Inspect hybrid auto-typing model availability and search paths.",
+        help="Inspect the auto-labeler's model folder and where it was found.",
     )
     models_sub = models.add_subparsers(dest="feature")
     models_status = models_sub.add_parser(
         "status",
-        help="Report which model files are reachable and where they were found.",
+        help="Report the labeler version and which model folder is used.",
     )
     models_status.add_argument(
         "--model-dir",
@@ -766,7 +764,6 @@ def _normalize_cli_argv(argv: list[str]) -> list[str]:
         "morphology",
         "geometry",
         "plugins",
-        "gpu-status",
         "doctor",
         "models",
         "train",
@@ -866,19 +863,6 @@ def main(argv: list[str] | None = None) -> int:
                 raise FileNotFoundError(str(file_path))
             issues = _build_cli_issue_list(file_path, config_overrides=_parse_config_overrides(args.config_json))
             _print_issue_check_results(file_path, issues)
-            return 0
-
-        if args.tool == "gpu-status":
-            from swcstudio.core.gpu_status import (  # noqa: PLC0415
-                check_gpu_readiness,
-                format_gpu_readiness,
-            )
-
-            st = check_gpu_readiness()
-            if bool(getattr(args, "json", False)):
-                _print_json(st.to_dict())
-            else:
-                print(format_gpu_readiness(st))
             return 0
 
         if args.tool == "doctor":
@@ -1040,13 +1024,11 @@ def main(argv: list[str] | None = None) -> int:
                 zip_output=False,
                 cell_type=args.cell_type,
                 flag_enabled=not bool(getattr(args, "no_flag", False)),
-                flag_strictness=max(0.0, min(1.0, float(args.flag_strictness))),
-                flag_feature_mode=str(getattr(args, "flag_feature_mode", "compact") or "compact"),
+                flag_budget=float(getattr(args, "flag_budget", 0.10)),
             )
             cfg_overrides = _parse_config_overrides(args.config_json) or {}
             if getattr(args, "model_dir", None):
                 cfg_overrides["model_dir"] = str(args.model_dir)
-            cfg_overrides["flag_feature_mode"] = opts.flag_feature_mode
             from swcstudio.core.auto_typing import is_available  # noqa: PLC0415
             ok, reason = is_available(model_dir=cfg_overrides.get("model_dir"))
             if not ok:
@@ -1072,6 +1054,15 @@ def main(argv: list[str] | None = None) -> int:
             failures: list[str] = []
             per_file: list[str] = []
             commits: list[dict] = []
+            records: list[dict] = []
+            from swcstudio.core.auto_typing import (  # noqa: PLC0415
+                apply_flag_budget,
+                cell_class_name,
+                write_flag_review,
+            )
+            from swcstudio.core.auto_typing.runner import flag_record  # noqa: PLC0415
+            from swcstudio.core.reporting import operation_report_path_for_folder, timestamp_slug  # noqa: PLC0415
+            run_timestamp = timestamp_slug()
 
             for swc_path in swc_files:
                 try:
@@ -1088,8 +1079,12 @@ def main(argv: list[str] | None = None) -> int:
                 except Exception as e:  # noqa: BLE001
                     msg = f"{swc_path.name}: {e}"
                     failures.append(msg)
+                    qc = None
                     if "QC rejected" in str(e):
                         files_qc_failed += 1
+                        qc = str(e).split("QC rejected; ", 1)[-1].split("; ")
+                    records.append(flag_record(swc_path, None, None, 0, 0, qc_reasons=qc,
+                                               error=None if qc else str(e)))
                     per_file.append(msg)
                     continue
 
@@ -1098,16 +1093,17 @@ def main(argv: list[str] | None = None) -> int:
                 params = {
                     "cell_type": opts.cell_type,
                     "flag_enabled": bool(opts.flag_enabled),
-                    "flag_strictness": float(opts.flag_strictness),
-                    "flag_feature_mode": opts.flag_feature_mode,
+                    "flag_budget": float(opts.flag_budget),
+                    "labeler_version": out.get("labeler_version"),
                     "model_dir": cfg_overrides.get("model_dir"),
                     "nodes_total": int(out.get("nodes_total", 0)),
                     "type_changes": int(out.get("type_changes", 0)),
                     "cell_type_result": out.get("cell_type"),
                     "cell_type_source": out.get("cell_type_source"),
+                    "stage1_cell_type": out.get("stage1_cell_type"),
                     "stage1_confidence": out.get("stage1_confidence"),
-                    "flagged": bool(flag_result.get("flagged", False)),
-                    "flag_score": flag_result.get("rank_score"),
+                    "class_mismatch": bool(out.get("class_mismatch", False)),
+                    "predicted_f1": flag_result.get("predicted_f1"),
                 }
                 with tracked_op(
                     swc_path,
@@ -1116,7 +1112,7 @@ def main(argv: list[str] | None = None) -> int:
                     message=(
                         "batch auto-label "
                         f"type_changes={int(out.get('type_changes', 0))} "
-                        f"cell_type={out.get('cell_type') or 'unknown'}"
+                        f"cell_class={cell_class_name(out.get('cell_type'))}"
                     ),
                     is_ai=True,
                 ) as op:
@@ -1126,8 +1122,8 @@ def main(argv: list[str] | None = None) -> int:
                 total_nodes += int(out.get("nodes_total", 0))
                 total_type_changes += int(out.get("type_changes", 0))
                 total_radius_changes += int(out.get("radius_changes", 0))
-                if bool(flag_result.get("flagged", False)):
-                    files_flagged += 1
+                records.append(flag_record(swc_path, swc_path, out.get("result_obj"),
+                                           int(out.get("nodes_total", 0)), int(out.get("type_changes", 0))))
                 commits.append(
                     {
                         "file": swc_path.name,
@@ -1136,16 +1132,26 @@ def main(argv: list[str] | None = None) -> int:
                         "branch": op.result.branch,
                     }
                 )
+                f1 = flag_result.get("predicted_f1")
                 per_file.append(
                     f"{swc_path.name}: nodes={int(out.get('nodes_total', 0))}, "
                     f"type_changes={int(out.get('type_changes', 0))}, "
-                    f"cell_type={out.get('cell_type') or 'unknown'} "
-                    f"({out.get('cell_type_source') or 'stage1'}), "
-                    f"flag={bool(flag_result.get('flagged', False))}, "
-                    f"out_types(soma/axon/basal/apic)="
+                    f"cell_class={cell_class_name(out.get('cell_type'))} "
+                    f"({'user' if out.get('cell_type_source') == 'user' else 'auto'}), "
+                    + (f"predicted_f1={float(f1):.3f}, " if f1 is not None else "")
+                    + f"out_types(soma/axon/basal/apic)="
                     f"{out_counts.get(1, 0)}/{out_counts.get(2, 0)}/"
                     f"{out_counts.get(3, 0)}/{out_counts.get(4, 0)}"
                 )
+
+            flag_review_path = None
+            if bool(opts.flag_enabled) and records:
+                apply_flag_budget(records, float(opts.flag_budget))
+                files_flagged = sum(1 for r in records if r.get("flagged"))
+                flag_review_path = str(write_flag_review(
+                    operation_report_path_for_folder(folder, "flag_review", extension=".json",
+                                                     timestamp=run_timestamp),
+                    records, budget=float(opts.flag_budget), folder=str(folder), timestamp=run_timestamp))
 
             _print_json(
                 {
@@ -1158,6 +1164,9 @@ def main(argv: list[str] | None = None) -> int:
                     "total_type_changes": total_type_changes,
                     "total_radius_changes": total_radius_changes,
                     "files_flagged": files_flagged,
+                    "flag_budget": float(opts.flag_budget) if opts.flag_enabled else None,
+                    "flag_review_path": flag_review_path,
+                    "flagged_files": [r["file"] for r in records if r.get("flagged")],
                     "per_file": per_file,
                     "failures": failures,
                     "commits": commits,
@@ -1476,13 +1485,11 @@ def main(argv: list[str] | None = None) -> int:
                 zip_output=False,
                 cell_type=args.cell_type,
                 flag_enabled=not bool(getattr(args, "no_flag", False)),
-                flag_strictness=max(0.0, min(1.0, float(args.flag_strictness))),
-                flag_feature_mode=str(getattr(args, "flag_feature_mode", "compact") or "compact"),
+                flag_budget=float(getattr(args, "flag_budget", 0.10)),
             )
             cfg_overrides = _parse_config_overrides(args.config_json) or {}
             if getattr(args, "model_dir", None):
                 cfg_overrides["model_dir"] = str(args.model_dir)
-            cfg_overrides["flag_feature_mode"] = opts.flag_feature_mode
             from swcstudio.core.auto_typing import is_available  # noqa: PLC0415
             ok, reason = is_available(model_dir=cfg_overrides.get("model_dir"))
             if not ok:
@@ -1504,16 +1511,17 @@ def main(argv: list[str] | None = None) -> int:
             params = {
                 "cell_type": opts.cell_type,
                 "flag_enabled": bool(opts.flag_enabled),
-                "flag_strictness": float(opts.flag_strictness),
-                "flag_feature_mode": opts.flag_feature_mode,
+                "labeler_version": out.get("labeler_version"),
                 "model_dir": cfg_overrides.get("model_dir"),
                 "nodes_total": int(out.get("nodes_total", 0)),
                 "type_changes": int(out.get("type_changes", 0)),
                 "cell_type_result": out.get("cell_type"),
                 "cell_type_source": out.get("cell_type_source"),
+                "stage1_cell_type": out.get("stage1_cell_type"),
                 "stage1_confidence": out.get("stage1_confidence"),
+                "class_mismatch": bool(out.get("class_mismatch", False)),
                 "flagged": bool(flag_result.get("flagged", False)),
-                "flag_score": flag_result.get("rank_score"),
+                "predicted_f1": flag_result.get("predicted_f1"),
                 "out_type_counts": out_counts,
             }
             with tracked_op(
@@ -1523,7 +1531,7 @@ def main(argv: list[str] | None = None) -> int:
                 message=(
                     "auto-label "
                     f"type_changes={int(out.get('type_changes', 0))} "
-                    f"cell_type={out.get('cell_type') or 'unknown'}"
+                    f"cell_class={out.get('cell_type') or 'auto'}"
                 ),
                 is_ai=True,
             ) as op:
@@ -1996,28 +2004,24 @@ def main(argv: list[str] | None = None) -> int:
                 })
                 return 0
 
-        # -------- train (custom hybrid models)
+        # -------- train (the labeler on your own data)
         if args.tool == "train" and args.feature == "auto-typing":
             from swcstudio.core.auto_typing_train import train_user_models  # noqa: PLC0415
             res = train_user_models(
                 data_dir=args.data_dir,
                 output_dir=args.output_dir,
-                train_gnn=not bool(args.no_gnn),
-                seed=int(args.seed),
-                gnn_hidden=int(args.gnn_hidden),
-                gnn_layers=int(args.gnn_layers),
-                gnn_dropout=float(args.gnn_dropout),
-                gnn_epochs=int(args.gnn_epochs),
-                gnn_patience=int(args.gnn_patience),
+                seed=args.seed,
+                device=str(args.device),
+                skip=[s for s in str(args.skip or "").split(",") if s.strip()],
+                test_size=float(args.test_size),
             )
             _print_json({
                 "output_dir": res.output_dir,
-                "stage1_path": res.stage1_path,
-                "stage2_path": res.stage2_path,
-                "gnn_path": res.gnn_path,
-                "stage1_metrics": res.stage1_metrics,
-                "stage2_metrics_keys": sorted(list(res.stage2_metrics.keys())),
-                "gnn_metrics": res.gnn_metrics,
+                "seed": res.seed,
+                "model_paths": res.model_paths,
+                "counts": res.counts,
+                "timings_min": res.timings_min,
+                "skipped": res.skipped,
             })
             return 0
 

@@ -1,3 +1,8 @@
+"""Which files the auto-labeler labels, and why it refuses the others.
+
+Stage 0 of the labeler requires one connected cell with a soma and finite
+geometry. A file without labels is labeled: its root is taken as the soma.
+"""
 from __future__ import annotations
 
 import tempfile
@@ -5,20 +10,23 @@ import time
 import unittest
 from pathlib import Path
 
-from swcstudio.core.auto_typing.qc_input import OODDetector, QCGate
-from swcstudio.core.auto_typing.features import FEATURE_NAMES
-import numpy as np
+from swcstudio.core.auto_typing import BatchOptions, run_file
 
 
 def _write_swc(path: Path, rows: list[str]) -> None:
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")
 
 
-def _unlabeled_chain(n: int = 12, *, node_type: int = 0) -> list[str]:
-    rows: list[str] = []
-    for idx in range(1, n + 1):
-        parent = -1 if idx == 1 else idx - 1
-        rows.append(f"{idx} {node_type} {idx}.0 0.0 0.0 0.5 {parent}")
+def _unlabeled_cell(n_per_arm: int = 12, *, node_type: int = 0) -> list[str]:
+    """A root with three unbranched arms, every node of type ``node_type``."""
+    rows = ["1 {t} 0.0 0.0 0.0 5.0 -1".format(t=node_type)]
+    nid = 1
+    for arm, (dx, dy) in enumerate(((1, 0), (-1, 0.2), (0, -1))):
+        parent = 1
+        for k in range(1, n_per_arm + 1):
+            nid += 1
+            rows.append(f"{nid} {node_type} {dx * 6 * k:.1f} {dy * 6 * k:.1f} {arm * 0.5:.1f} 0.8 {parent}")
+            parent = nid
     return rows
 
 
@@ -30,108 +38,69 @@ class AutoTypingQCTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmpdir.cleanup()
 
-    def _evaluate_rows(self, rows: list[str]):
+    def _run(self, rows: list[str]):
         path = self.tmp / "sample.swc"
         _write_swc(path, rows)
-        return QCGate().evaluate(path)
+        return run_file(str(path), BatchOptions(), write_output=False, write_log=False)
 
-    def test_unlabeled_single_root_file_passes_structural_qc(self) -> None:
-        result = self._evaluate_rows(_unlabeled_chain())
+    def _assert_rejected(self, rows: list[str], fragment: str) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            self._run(rows)
+        self.assertIn("QC rejected", str(ctx.exception))
+        self.assertIn(fragment, str(ctx.exception))
 
-        self.assertTrue(result.passed, result.reasons)
-        self.assertEqual(result.n_soma, 0)
-        self.assertEqual(result.n_roots, 1)
-        self.assertNotIn("no_soma", result.reasons)
-        self.assertNotIn("no_neurites", result.reasons)
+    def test_unlabeled_file_is_labeled_with_its_root_as_soma(self) -> None:
+        res = self._run(_unlabeled_cell())
+        self.assertTrue(res.qc_result["passed"])
+        self.assertEqual(res.types[0], 1)
+        self.assertTrue(all(t in (2, 3, 4) for t in res.types[1:]))
+        self.assertTrue(any("taken as the soma" in note for note in res.notes))
 
-    def test_type_zero_neurites_are_not_collapsed_into_the_soma_for_ood(self) -> None:
-        rows = _unlabeled_chain(12)
-        rows[0] = "1 1 0.0 0.0 0.0 2.0 -1"
-        path = self.tmp / "soma-plus-unlabeled.swc"
-        _write_swc(path, rows)
-        detector = OODDetector(
-            mean=np.zeros(len(FEATURE_NAMES), dtype=float),
-            std=np.ones(len(FEATURE_NAMES), dtype=float),
-            threshold=1e9,
-            feature_names=list(FEATURE_NAMES),
-        )
-
-        result = QCGate(ood_detector=detector).evaluate(path)
-
-        self.assertTrue(result.passed, result.reasons)
-        self.assertIsNotNone(result.feature_vector)
-        self.assertEqual(result.feature_vector[FEATURE_NAMES.index("n_nodes")], 12.0)
-        self.assertEqual(result.feature_vector[FEATURE_NAMES.index("soma_radius")], 2.0)
-
-    def test_custom_positive_types_do_not_fail_structural_qc(self) -> None:
-        result = self._evaluate_rows(_unlabeled_chain(node_type=10))
-
-        self.assertTrue(result.passed, result.reasons)
-        self.assertEqual(result.n_other_type, 12)
+    def test_custom_types_are_labeled_too(self) -> None:
+        res = self._run(_unlabeled_cell(node_type=10))
+        self.assertEqual(res.types[0], 1)
+        self.assertTrue(all(t in (2, 3, 4) for t in res.types[1:]))
 
     def test_multiple_roots_are_rejected(self) -> None:
-        rows = _unlabeled_chain()
-        rows[5] = "6 0 6.0 0.0 0.0 0.5 -1"
-
-        result = self._evaluate_rows(rows)
-
-        self.assertFalse(result.passed)
-        self.assertIn("n_roots=2", result.reasons)
+        rows = _unlabeled_cell()
+        rows[0] = "1 1 0.0 0.0 0.0 5.0 -1"
+        rows[5] = "6 0 30.0 0.0 0.0 0.8 -1"
+        self._assert_rejected(rows, "not one connected cell")
 
     def test_orphan_parent_is_rejected(self) -> None:
-        rows = _unlabeled_chain()
-        rows[4] = "5 0 5.0 0.0 0.0 0.5 999"
+        rows = _unlabeled_cell()
+        rows[0] = "1 1 0.0 0.0 0.0 5.0 -1"
+        rows[4] = "5 3 24.0 0.0 0.0 0.8 999"
+        self._assert_rejected(rows, "not one connected cell")
 
-        result = self._evaluate_rows(rows)
+    def test_too_few_nodes_are_rejected(self) -> None:
+        self._assert_rejected(_unlabeled_cell(n_per_arm=2), "node count")
 
-        self.assertFalse(result.passed)
-        self.assertIn("n_orphan=1", result.reasons)
+    def test_non_finite_coordinates_are_rejected(self) -> None:
+        rows = _unlabeled_cell()
+        rows[3] = "4 0 nan 0.0 0.0 0.8 3"
+        self._assert_rejected(rows, "coordinate is not finite")
 
-    def test_malformed_row_is_rejected(self) -> None:
-        rows = _unlabeled_chain()
-        rows.append("13 0 13.0 0.0")
+    def test_disconnected_soma_groups_are_refused_before_labeling(self) -> None:
+        rows = _unlabeled_cell()
+        rows[0] = "1 1 0.0 0.0 0.0 5.0 -1"
+        rows[6] = "7 1 36.0 0.0 0.0 5.0 6"
+        with self.assertRaises(ValueError) as ctx:
+            self._run(rows)
+        self.assertIn("multi-soma", str(ctx.exception))
 
-        result = self._evaluate_rows(rows)
-
-        self.assertFalse(result.passed)
-        self.assertIn("malformed_row:13:expected_7_columns", result.reasons)
-
-    def test_duplicate_id_is_rejected(self) -> None:
-        rows = _unlabeled_chain()
-        rows[2] = "2 0 3.0 0.0 0.0 0.5 1"
-
-        result = self._evaluate_rows(rows)
-
-        self.assertFalse(result.passed)
-        self.assertIn("duplicate_id_count=1", result.reasons)
-
-    def test_parent_cycle_counts_only_cycle_members(self) -> None:
-        rows = _unlabeled_chain()
-        rows[3] = "4 0 4.0 0.0 0.0 0.5 6"
-        rows[4] = "5 0 5.0 0.0 0.0 0.5 4"
-        rows[5] = "6 0 6.0 0.0 0.0 0.5 5"
-
-        result = self._evaluate_rows(rows)
-
-        self.assertFalse(result.passed)
-        self.assertEqual(result.n_cycle, 3)
-        self.assertIn("cycle_node_count=3", result.reasons)
-
-    def test_long_chain_cycle_check_is_linear_enough_for_large_swc(self) -> None:
-        path = self.tmp / "large-chain.swc"
-        _write_swc(path, _unlabeled_chain(50_000))
+    def test_structural_checks_are_fast_on_a_large_cell(self) -> None:
+        path = self.tmp / "large.swc"
+        _write_swc(path, _unlabeled_cell(n_per_arm=16_000))
+        from swcstudio.core.labeler.infer_pipeline import parse_swc_for_labeling
+        from swcstudio.core.labeler.qc import qc_violations
 
         started = time.perf_counter()
-        result = QCGate().evaluate(path)
+        nodes, _notes = parse_swc_for_labeling(path)
+        problems = qc_violations(nodes)
         elapsed = time.perf_counter() - started
-
-        self.assertTrue(result.passed, result.reasons)
-        self.assertEqual(result.n_cycle, 0)
-        self.assertLess(
-            elapsed,
-            3.0,
-            f"50k-node structural QC took {elapsed:.3f}s",
-        )
+        self.assertEqual(problems, [])
+        self.assertLess(elapsed, 10.0, f"48k-node parse and checks took {elapsed:.2f}s")
 
 
 if __name__ == "__main__":

@@ -1,125 +1,322 @@
 # Auto-Typing Engine
 
-`SWC-Studio` uses one auto-labeling engine across the CLI, GUI, and
-Python API. There is no backend switch in the deployed app.
+`SWC-Studio` labels SWC files with the SWC auto-labeler, version 1.0.0
+(<https://github.com/Mio0v0/swc-autolabeler>). The CLI, the GUI and the
+Python API all run the same labeler. It labels every node as soma, axon,
+basal dendrite or apical dendrite from the cell's geometry, so the input
+file does not need labels.
+
+The labeler's code is copied into `swcstudio/core/labeler/` by
+`scripts/sync_labeler.py`. SWC-Studio runs it through
+`swcstudio.core.auto_typing`.
 
 ## What The Engine Does
 
-The current engine is a QC-label-flag pipeline:
+Each file goes through five stages:
 
-| Step | Purpose | Main model or code |
+| Stage | What it does | Model file |
 |---|---|---|
-| QC gate | Reject malformed, disconnected, or out-of-distribution files before prediction starts. The structural checks are type-agnostic and do not require existing soma or neurite labels. | `qc_gate.pkl` plus structural checks in `qc_input.py` |
-| Stage 1 | Detect cell type as pyramidal or interneuron, unless the user provides the type. | `cell_type_classifier.pkl` |
-| Stage 2 | Label primary subtrees as axon, basal, or apical. | `branch_classifier.pkl` |
-| Stage 2b | Re-decide apical vs basal on pyramidal dendrite branches using branch-graph context. | `gnn_apical_basal.pt` |
-| Branch3 | Conservatively rescue difficult pyramidal apical/basal cases. | `gnn_branch3_rescue.pt` |
-| Stage 3 | Apply topology cleanup and soma-boundary constraints. | code in `pipeline.py` |
-| Flag scoring | Estimate whether the final cell-level labels look unreliable. | compact `flag_model_*.joblib` files |
+| Stage 0, structural checks | Checks that the file holds one connected cell (a single root and no orphan nodes) with a soma, at least one neurite node, between 10 and 200,000 nodes, finite coordinates, and finite, non-negative radii. | none (rules) |
+| Stage 1, cell class | Decides from whole-cell shape whether the cell is 3-class or 2-class. | `cell_type_classifier.pkl` |
+| Stage 2, subtree labels | A gradient-boosted classifier labels each primary subtree that leaves the soma. | `branch_classifier.pkl` |
+| Stage 3, topology rules and correction | Rules enforce the expected anatomy, for example a single axon tree and, for 3-class cells, a single apical tree. For 3-class cells, a learned correction then re-decides single branches within 150 µm of path length from the soma. | `branch_correction.joblib` |
+| Stage 4, quality flag | Predicts the cell's per-cell F1, that is, how well the cell was labeled. | `flag_model.joblib` |
 
-Stage 1 has a soft handoff path: when its confidence is low, the engine
-runs the downstream labeling path for both cell types and picks the more
-confident result. If the user selects `pyramidal` or `interneuron`, Stage
-1 is skipped and that cell type is used directly.
+### Input files
 
-The compact flagger is the deployed flagger. It uses features already
-available from the auto-labeling inference pass, including Branch3
-disagreement features. Research-only flag bundles that require
-unsupported `baseline_` or `xmodel_` disagreement features are rejected by
-the runtime and are not shipped in SWC-Studio.
+- A file with no soma label takes its root as the soma.
+- A file with no neurite labels is fine. Every node other than the soma
+  is treated as an unlabeled neurite, and the labels are predicted from
+  geometry alone.
+- The result `notes` say when either of these rules was used.
+- A soma drawn with several points is merged into one node for
+  labeling. All of its points are labeled soma.
+- A file that fails Stage 0 is not labeled. The error says
+  `QC rejected` and lists the reasons.
+- A file whose soma nodes form several disconnected groups holds
+  several cells. It is refused before labeling. Split it first with
+  `swcstudio split <folder>` (`batch split`).
+
+In the CLI and GUI, auto-labeling changes node types only. Coordinates,
+radii and parent IDs stay as they are.
+
+### Cell class
+
+The labeler knows two cell classes. SWC-Studio names them by the labels
+they assign:
+
+| Cell class | Labels written | Labeler's name |
+|---|---|---|
+| 3-class | soma (1), axon (2), basal dendrite (3), apical dendrite (4) | `pyramidal` |
+| 2-class | soma (1), axon (2), dendrite (written as type 3) | `interneuron` |
+
+With **Auto**, the default, Stage 1 decides the class from whole-cell
+shape. You can also choose the class yourself. Stage 1 still runs. If it
+predicts the other class, the cell is labeled with the class you chose
+and flagged as a **class mismatch**, so that you check it.
+
+The `cell_type` fields in JSON results and in history records use the
+labeler's names (`pyramidal`, `interneuron`). Commands and settings
+accept both kinds of name.
+
+### Quality flag
+
+Stage 4 has one flag per cell class. It predicts the cell's per-cell F1,
+a score from 0 to 1 of how well the cell's nodes were labeled. The
+cell's suspicion score is 1 minus the predicted F1. The flag never
+changes labels. It only ranks cells for review.
+
+- **One file.** The cell is flagged when its predicted F1 falls below
+  the flag's fixed cut-off. The cut-off is the score at which 10% of the
+  cells the flag was fitted on are flagged.
+- **A batch.** Each cell class flags its riskiest share of cells,
+  rounded to the nearest whole cell. This share is the **flag budget**.
+  The default is 10%, the share at which the labeler's flag was
+  evaluated. A class with fewer than 1 / budget cells (fewer than 10
+  cells at 10%) uses the fixed cut-off instead.
+- A class mismatch is always flagged. Its predicted F1 is not scored.
+- Files that were not labeled are listed in a batch's review, but they
+  are never flagged.
+
+See [Reviewing Flagged Cells](#reviewing-flagged-cells) for the review
+workflow.
 
 ## Required Model Files
 
-The production bundle in `swcstudio/data/models/` contains:
+The model set is one folder, `labeler-1.0.0/`. It ships inside the
+package at `swcstudio/data/models/labeler-1.0.0/`, so pip wheels, source
+installs and the desktop apps can label without a download.
 
-| Filename | Role | Current raw size |
-|---|---|---|
-| `cell_type_classifier.pkl` | Stage 1 cell-type classifier | about 1.1 MB |
-| `branch_classifier.pkl` | Stage 2 subtree labeler | about 73.4 MB |
-| `gnn_apical_basal.pt` | Stage 2b GraphSAGE apical/basal head | about 0.1 MB |
-| `gnn_branch3_rescue.pt` | Branch3 rescue head | about 0.1 MB |
-| `qc_gate.pkl` | QC gate | tiny |
-| `flag_model_pyramidal.joblib` | compact pyramidal flagger | about 0.3 MB |
-| `flag_model_interneuron.joblib` | compact interneuron flagger | about 0.1 MB |
-| `flag_model_all.joblib` | compact fallback flagger | about 0.1 MB |
+| Filename | Role | Required? | Size |
+|---|---|---|---|
+| `cell_type_classifier.pkl` | Stage 1, cell class | yes | about 1.3 MB |
+| `branch_classifier.pkl` | Stage 2, subtree labels | yes | about 47.4 MB |
+| `branch_correction.joblib` | Stage 3, branch correction | yes | about 1.2 MB |
+| `flag_model.joblib` | Stage 4, one quality flag per cell class | no | about 0.4 MB |
 
-The core prediction stages, Branch3 rescue, QC gate, torch, and
-torch_geometric are required for auto-labeling. The learned flag models
-are optional at runtime: if the required prediction stack is present but a
-flag model is missing, labeling can still run without a flag result.
+Without `flag_model.joblib`, cells are labeled but no flag is scored.
+The files form one set, because each model was trained with the
+others. Keep them together in one folder.
+
+`swcstudio/core/labeler/LABELER.json` records the labeler version, the
+source commit and the SHA-256 of each model file.
+
+Labeling needs numpy, scikit-learn 1.5.x, XGBoost 3.2.x, joblib and
+pandas. It runs on the CPU and needs no GPU.
 
 ## Model Resolution
 
-When the engine looks up a model file, it checks paths in this order and
-uses the first match:
+A folder you name is the only folder searched. You can name one with:
 
-1. `--model-dir`, the GUI model directory control, or the Python
-   `model_dir` argument
-2. `SWCSTUDIO_MODEL_DIR`
-3. the user model directory:
+- `--model-dir` on the CLI, or the `model_dir` argument in Python
+- the **Model folder** picker in the GUI
+- the `model_dir` key of the auto-typing configuration file
+- the `SWCSTUDIO_MODEL_DIR` environment variable
+
+They take precedence in that order. The named folder can hold the model
+files itself, or hold them in a `labeler-1.0.0/` subfolder. If it lacks
+a required file, auto-labeling stops and reports what is missing. It
+does not fall back to other models.
+
+Without a named folder, SWC-Studio searches these places in order and
+uses the first complete one. In each place it looks in the
+`labeler-1.0.0/` subfolder first:
+
+1. the user data folder, where model updates are installed:
    - Windows: `%APPDATA%\swcstudio\models`
    - macOS: `~/Library/Application Support/swcstudio/models`
    - Linux: `~/.local/share/swcstudio/models`
-4. the bundled package directory: `swcstudio/data/models/`
+2. the desktop app's model folder (the bundled app sets
+   `SWCSTUDIO_BUNDLED_MODEL_DIR`)
+3. the package folder `swcstudio/data/models`
 
-Pip wheels, source installs, and bundled desktop apps all include the
-production model files. If those files are removed, the resolver can
-still use the GitHub Releases model layer as a repair/update fallback.
+If none of them is complete, SWC-Studio downloads the model set of the
+latest release into the user data folder and searches again. Installed
+copies already carry the model set, so this is a repair path only.
 
-Check the current resolution status with:
+Model updates from GitHub Releases (Help -> Check for Updates) install
+into the user data folder. An update replaces that folder's contents.
+Keep models you trained in a folder of your own and name it with
+`SWCSTUDIO_MODEL_DIR` or `--model-dir`.
+
+Check which folder is used with:
 
 ```bash
 swcstudio models status
 swcstudio models status --model-dir /path/to/models
 swcstudio doctor
-swcstudio gpu-status
 ```
+
+`models status` prints the labeler version and commit, every folder it
+searched with a marker such as `[COMPLETE]` or `[MISSING]`, the folder
+it uses, and the path of each model file. `doctor` also loads each model
+file to check that it can be read; `doctor --quick` only checks that the
+files exist.
 
 ## Running Auto-Labeling
 
-Single file:
+One file. The labels are written back into the file and recorded in its
+history:
 
 ```bash
 swcstudio auto-label cell.swc
-swcstudio auto-label cell.swc --cell-type pyramidal --flag-strictness 0.8
+swcstudio auto-label cell.swc --cell-class 3-class
 swcstudio auto-label cell.swc --no-flag
 swcstudio auto-label cell.swc --model-dir /path/to/models
 ```
 
-Folder:
+A folder. Every `.swc` file is labeled in place, each with its own
+history, and the cells are ranked for review:
 
 ```bash
 swcstudio auto-typing ./swc-folder
-swcstudio auto-typing ./swc-folder --cell-type unknown --flag-strictness 0.5
+swcstudio auto-typing ./swc-folder --cell-class 2-class
+swcstudio auto-typing ./swc-folder --flag-budget 0.05
 swcstudio auto-typing ./swc-folder --model-dir /path/to/models
 ```
 
-The GUI Auto Label Editing panels expose the same controls: input
-selection, optional model directory, cell type (`unknown`, `pyramidal`,
-`interneuron`), flag enable/disable, and a loose-to-strict flag
-strictness control.
+The [CLI Reference](../CLI_REFERENCE.md) lists every option and the JSON
+output.
+
+In the GUI:
+
+- **Morphology Editing -> Auto Label Editing** labels the current
+  canvas. Choose the **Cell class** (`Auto (Stage 1 decides)`,
+  `3-class (axon, basal, apical)` or `2-class (axon, dendrite)`), turn
+  the **Quality flag** on or off, and optionally pick a **Model
+  folder**. The indicator next to the folder says `ready` when the
+  models are found. **Run** applies the labels to the canvas and
+  records them in the file's history. The result shows the nodes, the
+  type changes, the cell class and whether you chose it or Stage 1 did,
+  the output type counts, the predicted per-cell F1, the flag state
+  with its reason, a warning on a class mismatch, and notes about
+  unlabeled input. **Show JSON** opens the auto-typing configuration
+  file.
+- **Batch Processing -> Auto Label Editing** labels a folder. Use
+  **Select Folder**, then **Run**. The tab has the same model folder
+  picker, cell class and quality flag controls, plus **Flag the
+  riskiest [N %] of each cell class** (1% to 50%, 10% by default). Each
+  source file is updated in place with its own history. When a batch
+  with the quality flag on finishes, the Flag Review window opens.
+  **Open Flag Review** opens the last batch's review again.
+
+Window -> Show/Hide Auto Typing Guide shows a short description of the
+stages.
+
+## Reviewing Flagged Cells
+
+When the quality flag is on, a batch ranks its labeled cells for review
+and saves the ranking as a flag review:
+`<folder>_flag_review_<timestamp>.json` with a `.csv` copy, written into
+the folder. The GUI batch and `swcstudio auto-typing` both write one.
+The **Flag Review** window shows it.
+
+### Open the window
+
+- It opens by itself when a GUI batch with the quality flag on
+  finishes.
+- **Window -> Show/Hide Flag Review** shows or hides it. It is a dock at
+  the bottom of the main window, and it can float.
+- **Open Review...** loads a saved review, for example one written by
+  `swcstudio auto-typing`.
+- **Open Flag Review** in the Batch Processing tab opens the last
+  batch's review.
+
+### What the table shows
+
+Every file of the batch has a row. The rows start riskiest first:
+flagged cells, then class mismatches, then the lowest predicted F1.
+Files that were not labeled come last. Click a column header to sort by
+that column.
+
+| Column | Meaning |
+|---|---|
+| Flag | `●` when the cell is flagged |
+| File | the file name |
+| Class | 3-class or 2-class |
+| Predicted F1 | the flag's predicted per-cell F1 |
+| Rank | the cell's rank within its class, riskiest first, for example `1 / 13` |
+| Reason | why the cell is flagged, or why the file was not labeled |
+| Stage 1 | Stage 1's predicted class and its confidence |
+| Nodes | the number of nodes |
+| Changes | how many node types the labeler changed |
+| Review | your mark: OK or Corrected |
+
+The reasons are:
+
+- `riskiest 10% of its class` (with the share you set)
+- `predicted F1 below the flag's cut-off`, for a class too small for
+  the share
+- `class mismatch: Stage 1 predicts ...`
+- `not labeled: ...` with the structural check results or the error
+
+Flagged rows have a light red background, class mismatches a light
+orange one, and files that were not labeled have grey text. A summary
+line above the table counts the labeled cells, the flagged cells of
+each class, the class mismatches, the reviewed cells and the files that
+were not labeled.
+
+### Controls
+
+- **Flag the riskiest [N %] of each cell class** sets the flag budget,
+  from 1% to 50%. The table updates at once.
+- **Show** filters the rows: All cells, Flagged, 3-class, 2-class,
+  Class mismatch, Not reviewed, Not labeled.
+
+### Review a cell
+
+1. Select a row and click **Open Cell**, or double-click the row. The
+   labeled file opens in the main window.
+2. Check the labels. Fix them with Manual Label Editing if needed.
+3. Mark the row. **Mark OK** means the labels were checked and are
+   right. **Mark Corrected** means you fixed them by hand. **Clear
+   Mark** removes the mark. Only labeled cells can be marked.
+
+The marks and the chosen share are saved back into the review file,
+both the JSON and the CSV. You can close the window and resume later
+with **Open Review...**. **Export CSV...** saves a copy of the review as
+a CSV file where you choose.
+
+The review JSON holds the folder, the time stamp, the labeler version,
+the flag budget and one record per file. The CSV has one row per file
+with the same fields.
 
 ## Runtime Performance
 
-The first auto-label run in a process is normally slower because Python,
-the ML libraries, and each model must be initialized. Later runs reuse
-the loaded model objects:
+The first labeling run in a process reads the model files. Later runs in
+the same process reuse them until a file changes on disk.
 
-- Stage 1 and Stage 2 caches are keyed by resolved model path, modified
-  time, and file size, so replacing a model invalidates the cached copy.
-- Stage 2b, Branch3, QC-gate, and flag-model state is also reused where
-  applicable.
-- structural QC cycle detection uses a linear traversal rather than
-  repeatedly walking every node's parent chain.
+The GUI runs labeling in a separate process, so the window stays
+responsive. After you apply an auto-label result in the GUI, the next
+validation refresh reuses that result and does not label the cell
+again.
 
-In the GUI, applying an auto-label result also supplies the
-type-suspicion state for the immediately following validation refresh.
-That refresh does not launch the same inference a second time.
+## Configuration
 
-The application remains CPU-oriented by default. Inference time still
-grows with morphology size and branch complexity, and the portable
-Windows executable can be slower on its first run than an already-warm
-developer environment.
+The auto-typing settings live in
+`swcstudio/tools/batch_processing/configs/auto_typing.json`:
+
+| Key | Meaning |
+|---|---|
+| `enabled` | `true` by default |
+| `model_dir` | a model folder to use; empty means `SWCSTUDIO_MODEL_DIR` if set, otherwise the default search |
+| `cell_type` | `auto`, `3-class` or `2-class` |
+| `flag_enabled` | score the quality flag (`true` by default) |
+| `flag_budget` | the share of each cell class a batch flags (`0.1` by default) |
+
+How the values are used:
+
+- In the CLI, the GUI and `swcstudio.api`, `model_dir` applies when no
+  model folder is given with `--model-dir` or the GUI picker. The
+  functions in `swcstudio.core.auto_typing` take `model_dir` as an
+  argument instead.
+- The GUI panels take their starting cell class and flag budget from
+  the file. **Show JSON** opens the file for editing.
+- The **Likely wrong labels** check uses the file's cell class.
+- `swcstudio.api.batch_auto_typing` and
+  `swcstudio.api.validation_auto_typing_file` use the file's values when
+  you pass no options.
+- The CLI takes the cell class and flag settings from its own options.
 
 ## Python API
 
@@ -135,30 +332,32 @@ from swcstudio.core.auto_typing import (
 ok, reason = is_available()
 print(backend_status())
 
-opts = BatchOptions(
-    soma=True,
-    axon=True,
-    basal=True,
-    apic=True,
-    rad=False,
-    zip_output=False,
-    cell_type="unknown",
-    flag_enabled=True,
-    flag_strictness=0.5,
-    flag_feature_mode="compact",
-)
+opts = BatchOptions(cell_type="auto", flag_enabled=True, flag_budget=0.10)
 
 single = run_file("cell.swc", opts)
+print(single.cell_type, single.class_mismatch, single.flag_result)
+
 folder = run_batch("./swc-folder", opts)
+print(folder.files_flagged, folder.flag_review_path)
 ```
 
-`flag_feature_mode` is kept for compatibility. `compact`, `simple`,
-`auto`, `baseline`, and `complex` all resolve to compact scoring in the
-current runtime.
+`run_file` returns a `FileResult` and does not change the input file.
+By default it writes a labeled copy and a text report into
+`<stem>_swc_studio_output/`; pass `write_output=False` and
+`write_log=False` to skip them. `run_batch` does not change the input
+files either. It writes labeled copies into the folder
+`<folder>_batch_auto_typing_<timestamp>/` inside the input folder,
+together with a text report and, when the flag is on,
+`flag_review.json` / `flag_review.csv`.
+
+To label files in place with history, as the CLI and GUI do, use
+`swcstudio.api.batch_auto_typing`. See
+[API Documentation](../API_DOCUMENTATION.md).
 
 ## Training Custom Models
 
-The public training command trains the core custom-training stack:
+`swcstudio train auto-typing` runs the labeler's own trainer, the same
+code that built the shipped models, on your labeled files:
 
 ```bash
 swcstudio train auto-typing --data-dir my_dataset --output-dir my_models
@@ -168,43 +367,119 @@ Expected dataset layout:
 
 ```text
 my_dataset/
-  pyramidal/
+  pyramidal/        3-class cells (axon, basal, apical)
     cell_001.swc
     cell_002.swc
-  interneuron/
+  interneuron/      2-class cells (axon, dendrite)
     cell_a.swc
 ```
 
-The command writes:
+Each file's type column is the per-node ground truth: 1 soma, 2 axon,
+3 basal dendrite (or dendrite), 4 apical dendrite.
 
-- `cell_type_classifier.pkl`
-- `branch_classifier.pkl`
-- `gnn_apical_basal.pt`
+The trainer holds out a fixed share of the files, chosen from the file
+name and the seed (20% by default). The labeler is not fitted on these
+files. The quality flag is fitted on them. The trainer then fits, in
+order:
 
-The deployed production engine also expects `gnn_branch3_rescue.pt` and
-`qc_gate.pkl`, and can use the compact `flag_model_*.joblib` files when
-available. The current public training command does not train Branch3,
-QC, or flag models.
+1. Stage 1, the cell-class classifier
+2. Stage 2, the subtree classifier
+3. Stage 3, the branch correction (3-class cells)
+4. Stage 4, the quality flag for each cell class
+
+Options:
+
+- `--seed S` fixes the held-out split. Without it, a random seed is
+  drawn and recorded.
+- `--test-size 0.20` sets the held-out share.
+- `--device cpu|cuda` sets where Stages 1 and 2 are fitted. The default
+  is `cpu`. `cuda` needs an NVIDIA GPU and a CUDA build of XGBoost.
+- `--skip stage1,stage2,correction,flag` leaves stages out. For
+  example, `--skip flag` makes a model set without a quality flag.
+
+The output folder holds the four model files, `eval_split.json` (the
+split used) and `train_manifest.json` (counts and timings). Label with
+it through `--model-dir`, `SWCSTUDIO_MODEL_DIR` or the GUI's Model
+folder picker:
+
+```bash
+swcstudio auto-label cell.swc --model-dir my_models
+```
+
+A run on the labeler's own corpus (about 9,500 training cells) takes
+about 45 minutes. A few hundred cells take minutes.
 
 ## Troubleshooting
 
-`Auto-typing is missing required model files`
+### The model files are not found
 
-Run `swcstudio models status` and check the search paths. The required
-core files are Stage 1, Stage 2, Stage 2b, Branch3, and the QC gate.
+```text
+ERROR: auto-typing engine unavailable.
+Auto-labeling cannot find its model files.
+```
 
-`Auto-typing requires torch and torch_geometric`
+No complete model folder was found. The message lists every folder
+searched and what is missing. Run `swcstudio models status`. If you
+named a folder, check that it holds the three required files, directly
+or in `labeler-1.0.0/`.
 
-The installed Python environment is missing required dependencies for
-the GNN stages. Reinstall the package in the active environment. For GPU
-installs, run `swcstudio gpu-status` and follow
-[GPU Setup](../GPU_INSTALL.md).
+### A file is rejected
 
-`Pickle deserialization errors`
+```text
+cell.swc: QC rejected; not one connected cell (2 roots, 0 orphan nodes)
+```
 
-Stage 1 and Stage 2 are sklearn pickles. Use the dependency range pinned
-in `pyproject.toml`, or retrain the models under the sklearn version in
-your environment.
+The file failed Stage 0 and was not labeled. The reasons say which
+check failed. Fix the file with the validation and geometry tools, then
+label it again.
+
+### A file holds several cells
+
+```text
+cell.swc: multi-soma file (4 disconnected soma groups); split with `batch split` before auto-labeling
+```
+
+Run `swcstudio split <folder>` and label the split files.
+
+### A required package is missing
+
+```text
+Auto-labeling could not import one of its required packages ...
+```
+
+Repair the environment with
+`python -m pip install --upgrade --force-reinstall swcstudio`, then run
+`swcstudio doctor`.
+
+### The quality flag is not scored
+
+The GUI shows `Quality flag: not scored`, and the CLI's `flag_result`
+has `enabled: false` with the reason `no_flag_model` or
+`no_flag_for_class`. The model folder has no `flag_model.joblib`, or
+that file has no flag for the cell's class. The cell is still labeled.
+
+### A model file cannot be loaded
+
+The model files were written with scikit-learn 1.5 and XGBoost 3.2.
+Keep the versions pinned in `pyproject.toml`, or train the models again
+in your environment. `swcstudio doctor` loads each model file and
+reports any failure.
+
+## Maintaining The Copied Labeler
+
+These steps are for developers who update the labeler inside
+SWC-Studio:
+
+1. `python scripts/sync_labeler.py --source <labeler checkout>` copies a
+   committed labeler: its code into `swcstudio/core/labeler/` and its
+   models into `swcstudio/data/models/labeler-<version>/`. It also
+   writes `LABELER.json`. It refuses uncommitted changes unless you pass
+   `--allow-dirty`. Do not edit `swcstudio/core/labeler/` by hand.
+2. `python scripts/make_labeler_golden.py --source <labeler checkout>`,
+   run in the labeler's own environment, rewrites
+   `tests/fixtures/labeler/`: three synthetic cells and `expected.json`.
+3. `tests/test_labeler_parity.py` requires SWC-Studio's labels, cell
+   class and quality flag to equal the labeler's.
 
 ## Reference
 
@@ -212,5 +487,8 @@ your environment.
 |---|---|
 | `BatchOptions`, `BatchResult`, `FileResult` | `swcstudio.core.auto_typing` |
 | `run_file`, `run_batch`, `run_folder` | `swcstudio.core.auto_typing` |
+| `apply_flag_budget`, `write_flag_review` | `swcstudio.core.auto_typing` |
+| `normalize_cell_class`, `cell_class_name` | `swcstudio.core.auto_typing` |
 | `is_available`, `backend_status` | `swcstudio.core.auto_typing` |
 | `train_user_models` | `swcstudio.core.auto_typing_train` |
+| `resolve_model_dir`, `labeler_info` | `swcstudio.core.model_paths` |

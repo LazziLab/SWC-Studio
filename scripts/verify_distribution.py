@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import email
 import glob
+import hashlib
 import json
 import re
 import tarfile
@@ -11,18 +12,13 @@ import zipfile
 from pathlib import Path
 
 
-# Minimum sizes catch accidentally packaged Git LFS pointer files and empty
-# placeholders while allowing production models to change between releases.
-MODEL_FILES = {
-    "branch_classifier.pkl": 10_000_000,
-    "cell_type_classifier.pkl": 100_000,
-    "flag_model_all.joblib": 10_000,
-    "flag_model_interneuron.joblib": 10_000,
-    "flag_model_pyramidal.joblib": 10_000,
-    "gnn_apical_basal.pt": 10_000,
-    "gnn_branch3_rescue.pt": 10_000,
-    "qc_gate.pkl": 1_000,
-}
+ROOT = Path(__file__).resolve().parent.parent
+# The labeler SWC-Studio ships (written by scripts/sync_labeler.py): every model
+# file must be in the artifact with exactly the recorded SHA-256, which also
+# catches Git LFS pointer files and empty placeholders.
+LABELER = json.loads((ROOT / "swcstudio" / "core" / "labeler" / "LABELER.json").read_text(encoding="utf-8"))
+MODELS_DIR = f"swcstudio/data/models/{LABELER['models_dir']}"
+MODEL_FILES = {name: meta["sha256"] for name, meta in LABELER["models"].items()}
 
 CONFIG_FILES = (
     "batch_processing/configs/auto_typing.json",
@@ -50,8 +46,6 @@ RUNTIME_DISTRIBUTIONS = {
     "pyzipper",
     "scikit-learn",
     "scipy",
-    "torch",
-    "torch-geometric",
     "vispy",
     "xgboost",
     "zstandard",
@@ -112,8 +106,9 @@ def _read_member(path: Path, suffix: str) -> bytes | None:
 def verify_distribution(path: Path) -> dict:
     members, metadata_bytes = _read_artifact(path)
     required_suffixes = {
-        *(f"swcstudio/data/models/{name}" for name in MODEL_FILES),
+        *(f"{MODELS_DIR}/{name}" for name in MODEL_FILES),
         *(f"swcstudio/tools/{name}" for name in CONFIG_FILES),
+        "swcstudio/core/labeler/LABELER.json",
     }
     missing_files = sorted(
         suffix
@@ -128,20 +123,14 @@ def verify_distribution(path: Path) -> dict:
     }
     missing_dependencies = sorted(RUNTIME_DISTRIBUTIONS - dependencies)
     invalid_models = []
-    for name, minimum_size in MODEL_FILES.items():
-        payload = _read_member(path, f"swcstudio/data/models/{name}")
+    for name, sha256 in MODEL_FILES.items():
+        payload = _read_member(path, f"{MODELS_DIR}/{name}")
         if payload is None:
             continue
-        if len(payload) < minimum_size or payload.startswith(
-            b"version https://git-lfs.github.com/spec/"
-        ):
-            invalid_models.append(
-                {
-                    "name": name,
-                    "size": len(payload),
-                    "minimum_size": minimum_size,
-                }
-            )
+        digest = hashlib.sha256(payload).hexdigest()
+        if digest != sha256:
+            invalid_models.append({"name": name, "size": len(payload), "sha256": digest,
+                                   "expected_sha256": sha256})
 
     requires_python = str(metadata.get("Requires-Python", "")).strip()
     entry_points_ok = True
@@ -162,7 +151,7 @@ def verify_distribution(path: Path) -> dict:
             and entry_points_ok
         ),
         "model_count": sum(
-            any(member.endswith(f"swcstudio/data/models/{name}") for member in members)
+            any(member.endswith(f"{MODELS_DIR}/{name}") for member in members)
             for name in MODEL_FILES
         ),
         "config_count": sum(
