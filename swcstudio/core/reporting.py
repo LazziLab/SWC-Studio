@@ -413,8 +413,8 @@ def format_radii_cleaning_report_text(payload: dict[str, Any]) -> str:
 
 def format_auto_typing_report_text(payload: dict[str, Any]) -> str:
     lines: list[str] = []
-    lines.append("Rule-Based Auto-Typing Batch Report")
-    lines.append("-----------------------------------")
+    lines.append("Auto-Labeling Report")
+    lines.append("--------------------")
     lines.append(f"Generated: {_now()}")
     lines.append(f"Folder: {payload.get('folder', '')}")
     lines.append(f"Output folder: {payload.get('out_dir', '')}")

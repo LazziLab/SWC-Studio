@@ -2832,6 +2832,12 @@ class SWCMainWindow(QMainWindow):
         if result_payload.get("class_mismatch"):
             event_details.append(
                 f"Class mismatch: Stage 1 predicts {cell_class_name(result_payload.get('stage1_cell_type'))}")
+        # e.g. "no axon labeled", or nodes on a branch with no standard type
+        # that the labeler left as they were.
+        label_warnings = [str(w) for w in (_result_field(result_obj, "warnings") or []) if str(w).strip()]
+        event_details.extend(f"Warning: {w}" for w in label_warnings)
+        if label_warnings:
+            self._append_log(f"Auto label {source_doc.filename}: " + "; ".join(label_warnings), "WARN")
         # Provenance: this is an AI op. tracked_op auto-detects
         # OpKind.AUTO_LABEL as AI, captures the full env fingerprint
         # (every installed package + system info), records an
