@@ -158,7 +158,7 @@ def add_history_subparser(sub: argparse._SubParsersAction) -> None:
     ri.add_argument("file", type=Path)
 
     # verify
-    vf = hsub.add_parser("verify", help="Hash-check every blob")
+    vf = hsub.add_parser("verify", help="Hash-check every blob, the commit chain, refs and checksums")
     vf.add_argument("file", type=Path)
 
     # gc
@@ -621,8 +621,66 @@ def _cmd_verify(args) -> int:
             except (BlobCorruptError, BlobNotFoundError) as e:
                 n_bad += 1
                 print(f"FAIL {sha}: {e}")
+        problems = _history_problems(hist, store)
+        for problem in problems:
+            print(f"FAIL {problem}")
     print(f"verified {n_ok} blobs, {n_bad} failures")
-    return 1 if n_bad else 0
+    print(f"checked event log, refs and checksums, {len(problems)} problems")
+    return 1 if (n_bad or problems) else 0
+
+
+def _history_problems(hist: Path, store: ObjectStore) -> list[str]:
+    """Check everything ``verify`` covers besides blob content.
+
+    - each commit id matches the fields it hashes (spec §4), and its
+      parent is an earlier commit in the append-only log;
+    - every branch and tag points to a commit in the log;
+    - every blob a branch or tag can reach is present (``gc`` may have
+      removed the rest, so unreachable commits are not checked);
+    - the files listed in ``checksums.json`` still match it.
+    """
+    from swcstudio.core.provenance.canonical import sha256_hex
+    from swcstudio.core.provenance.events import MAX_SUPPORTED_SCHEMA_VERSION, compute_event_id
+
+    problems: list[str] = []
+    commits: set[str] = set()
+    events_path = hist / "events.jsonl"
+    lines = events_path.read_bytes().splitlines() if events_path.exists() else []
+    for n, line in enumerate(lines, start=1):
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            problems.append(f"events.jsonl line {n}: not valid JSON")
+            continue
+        if int(obj.get("schema_version", 1)) > MAX_SUPPORTED_SCHEMA_VERSION:
+            continue
+        event_id = str(obj.get("id", ""))
+        if compute_event_id(obj) != event_id:
+            problems.append(f"events.jsonl line {n}: id {event_id} does not match its content")
+        parent = obj.get("parent")
+        if parent is not None and parent not in commits:
+            problems.append(f"events.jsonl line {n}: parent {parent} is not an earlier commit")
+        commits.add(event_id)
+
+    refs = [(f"branch {name}", read_branch(hist, name)) for name in list_branches(hist)]
+    refs += [(f"tag {name}", read_tag(hist, name)) for name in list_tags(hist)]
+    for label, sha in refs:
+        if sha and sha not in commits:
+            problems.append(f"{label} points to {sha}, which is not in the log")
+
+    for sha in sorted(_reachable_blobs(hist)):
+        if not store.exists(sha):
+            problems.append(f"blob {sha} is referenced but missing")
+
+    checksums_path = hist / "checksums.json"
+    if checksums_path.exists():
+        for rel, digest in sorted(json.loads(checksums_path.read_bytes()).items()):
+            target = hist / rel
+            if not target.is_file():
+                problems.append(f"{rel} is listed in checksums.json but missing")
+            elif sha256_hex(target.read_bytes()) != digest:
+                problems.append(f"{rel} does not match checksums.json")
+    return problems
 
 
 def _cmd_gc(args) -> int:
