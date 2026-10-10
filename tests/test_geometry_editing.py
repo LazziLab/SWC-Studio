@@ -170,11 +170,7 @@ class SelectionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             core_geometry.make_selection(df, kind="nonsense", anchor_id=3)
 
-    # Bug: the tool-layer wrapper takes (df, item_id, kind, anchor_id, node_ids)
-    # but the core takes (df, *, kind, anchor_id, hops), so the GUI's
-    # make_selection(df, kind=..., anchor_id=..., hops=...) call raises
-    # TypeError (tools/geometry_editing/features/operations.py:34-35).
-    @unittest.expectedFailure
+    # The GUI panel calls the tool-layer wrapper this way; it must match core.
     def test_tool_layer_selection_accepts_gui_call(self) -> None:
         selection = ops.make_selection(_tree(), kind="subtree", anchor_id=3, hops=None)
         self.assertEqual(sorted(selection.node_ids), [3, 4, 5, 6])

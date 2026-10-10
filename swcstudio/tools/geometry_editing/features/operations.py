@@ -31,8 +31,8 @@ def subtree_node_ids(df: pd.DataFrame, root_id: int) -> list[int]:
     return _subtree_node_ids(df, root_id)
 
 
-def make_selection(df: pd.DataFrame, item_id: str, kind: str, anchor_id: int, node_ids: list[int]) -> GeometrySelection:
-    return _make_selection(df, item_id, kind, anchor_id, node_ids)
+def make_selection(df: pd.DataFrame, *, kind: str, anchor_id: int, hops: int | None = None) -> GeometrySelection:
+    return _make_selection(df, kind=kind, anchor_id=anchor_id, hops=hops)
 
 
 def reindex_dataframe(df: pd.DataFrame) -> pd.DataFrame:
