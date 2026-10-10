@@ -60,6 +60,8 @@ def run_tracked_batch(
 
     processed = 0
     failures: list[str] = []
+    # (file name, error) pairs, so callers need not split the strings above.
+    failed_files: list[tuple[str, str]] = []
     per_file: list[Any] = []
     commits: list[dict[str, Any]] = []
     total = len(swc_files)
@@ -97,7 +99,9 @@ def run_tracked_batch(
         except Exception as exc:  # noqa: BLE001
             error = str(exc)
             prefix = f"{swc_path.name}: "
-            failures.append(error if error.startswith(prefix) else prefix + error)
+            error = error[len(prefix):] if error.startswith(prefix) else error
+            failures.append(prefix + error)
+            failed_files.append((swc_path.name, error))
 
     return {
         "folder": str(folder_path),
@@ -107,6 +111,7 @@ def run_tracked_batch(
         "files_failed": len(failures),
         "per_file": per_file,
         "failures": failures,
+        "failed_files": failed_files,
         "commits": commits,
         "log_path": None,
     }
