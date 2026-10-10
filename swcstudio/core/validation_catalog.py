@@ -12,7 +12,7 @@ CHECK_CATALOG: list[tuple[str, list[tuple[str, str, str]]]] = [
             (
                 "valid_soma_format",
                 "Soma format is simple",
-                "Warns when a soma is represented by multiple connected type-1 nodes; validation uses a temporary consolidated soma working copy.",
+                "Warns when a soma is represented by multiple connected type-1 nodes. The other checks still run, on a temporary working copy with each soma group merged into one node.",
             ),
             (
                 "multiple_somas",

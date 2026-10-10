@@ -58,8 +58,8 @@ So one SWC can raise:
 
 | Key | Issue title | Source | Severity | How checked | Params | JSON | Related tool |
 |---|---|---|---|---|---|---|---|
-| `valid_soma_format` | `Complex soma format found` | native | warning | Groups connected type-`1` nodes and fails if any soma group has more than one node. | none | enabled/severity only | `Consolidate Soma` action |
-| `multiple_somas` | `Multiple somas found` | native | critical | Runs after temporary soma consolidation and fails if more than one soma anchor remains. | none | enabled/severity only | `Split` action |
+| `valid_soma_format` | `Complex soma format found` | native | warning | Groups connected type-`1` nodes and fails if any soma group has more than one node. The remaining checks still run, on a working copy with each soma group merged. | none | enabled/severity only | `Consolidate Soma` action |
+| `multiple_somas` | `Multiple somas found` | native | critical | Runs after temporary soma consolidation and fails if more than one soma anchor remains. The file holds several cells, so validation stops here; split it first. | none | enabled/severity only | `Split` action |
 | `has_soma` | `Soma missing` | native | critical | Fails if no node has type `1`. | none | enabled/severity only | Manual Label Editing / Auto Label Editing |
 | `no_invalid_negative_types` | `Invalid negative types found` | native | critical | Fails if any node type is `< 0`. | none | enabled/severity only | Manual Label Editing |
 | `custom_types_defined` | `Custom types need definitions` | native | warning | Requires every used custom type (`>= 5`) to have a saved name and color. | none | enabled/severity only | `Define Custom Types` dialog |

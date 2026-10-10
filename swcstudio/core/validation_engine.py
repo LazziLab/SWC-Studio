@@ -424,8 +424,10 @@ def run_validation_text(
                 result.status = "fail"
             result.label = display_label_for_result(item.key, bool(result.passed), item.label)
             results.append(result)
-            if item.key == "valid_soma_format" and not bool(result.passed):
-                break
+            # A complex soma is only a warning: every check already runs on
+            # the working copy with each soma group merged (ValidationContext),
+            # so keep going. Several separate somas mean several cells, and
+            # checks over the combined file would mislead, so stop there.
             if item.key == "multiple_somas" and not bool(result.passed):
                 break
         except Exception as e:  # noqa: BLE001

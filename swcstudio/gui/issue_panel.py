@@ -187,7 +187,7 @@ class IssuePanelWidget(QWidget):
             item.setForeground(0, self.palette().text())
             source_key = str(issue.get("source_key", "")).strip()
             title = str(issue.get("title", "Issue")).strip() or "Issue"
-            if source_key in {"valid_soma_format", "multiple_somas", "has_soma"}:
+            if source_key in {"multiple_somas", "has_soma"}:
                 item.setText(0, title)
                 item.setSizeHint(0, QSize(0, 60))
                 item.setData(0, _BLOCKING_ROLE, True)

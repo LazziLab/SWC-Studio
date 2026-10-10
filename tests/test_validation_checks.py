@@ -450,6 +450,32 @@ class FullValidationTests(unittest.TestCase):
             self.assertEqual(result.failing_node_ids, [], result.key)
         self.assertEqual(report.summary()["fail"], 0)
 
+    def test_complex_soma_does_not_stop_validation(self) -> None:
+        rows = _clean_neuron_rows()
+        n = len(rows)
+        last = rows[-1].split()
+        last[5] = "0"
+        rows = rows[:-1] + [" ".join(last), f"{n + 1} 1 2 0 0 4 1"]
+
+        report = run_validation_text(_swc(rows))
+
+        by_key = {r.key: r for r in report.results}
+        enabled = {k for k, rule in load_validation_config()["checks"].items() if rule.get("enabled", True)}
+        self.assertEqual(set(by_key), enabled)
+        self.assertFalse(by_key["valid_soma_format"].passed)
+        self.assertEqual(by_key["valid_soma_format"].status, "warning")
+        self.assertTrue(by_key["multiple_somas"].passed)
+        self.assertFalse(by_key["all_neurite_radii_nonzero"].passed)
+        self.assertEqual(by_key["all_neurite_radii_nonzero"].failing_node_ids, [int(last[0])])
+
+    def test_multiple_somas_still_stops_validation(self) -> None:
+        rows = _clean_neuron_rows() + [f"{len(_clean_neuron_rows()) + 1} 1 500 500 500 5 -1"]
+
+        report = run_validation_text(_swc(rows))
+
+        self.assertEqual(report.results[-1].key, "multiple_somas")
+        self.assertFalse(report.results[-1].passed)
+
     def test_every_neuron_morphology_check_runs_on_clean_neuron(self) -> None:
         register_neuron_morphology_checks()
         ctx = ValidationContext(_swc(_clean_neuron_rows()))

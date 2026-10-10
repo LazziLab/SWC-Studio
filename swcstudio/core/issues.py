@@ -191,7 +191,7 @@ def _tool_target_for_key(key: str) -> tuple[str, str, str]:
         return (
             "structure",
             "",
-            "Complex soma format must be resolved before the rest of the validation pipeline can continue.",
+            "Use Consolidate Soma to merge each connected soma group into one node. The other checks already ran on a merged working copy.",
         )
     if key == "multiple_somas":
         return (
@@ -546,7 +546,7 @@ def build_issue_list(
         base_issues = filtered_base_issues
 
     prereq = validation_prerequisite_summary(validation_report)
-    hard_blocked = bool(prereq.get("soma_gate_failed")) or bool(prereq.get("multiple_somas_failed"))
+    hard_blocked = bool(prereq.get("multiple_somas_failed"))
     critical_radii_node_ids = {
         int(node_id)
         for item in base_issues
