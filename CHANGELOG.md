@@ -25,6 +25,20 @@ follow [Semantic Versioning](https://semver.org/).
   parent is an earlier commit, that branches and tags point into the log,
   that every blob they reach is present, and that the files match
   `checksums.json`.
+- A complex soma (several connected soma points) no longer stops
+  validation. It is reported as one warning, and every other check still
+  runs, on a working copy with each soma group merged. Several separate
+  somas still stop it, since the file holds more than one cell.
+- The auto-label batch summary reads "Labeled" and "Not labeled (N failed
+  the structural checks, M errors)" instead of separate "QC rejected" and
+  "Failed" counts that overlapped. It lists every file that was not
+  labeled, and every batch writes a full report.
+- A labeled cell missing a compartment its class should have (for example
+  no axon) is marked with a warning in the batch results, the flag review
+  and its CSV.
+- The macOS install steps cover macOS 15, where an app Apple has not
+  notarized must be allowed in System Settings → Privacy & Security →
+  Open Anyway.
 
 ### Fixed
 
@@ -44,6 +58,11 @@ follow [Semantic Versioning](https://semver.org/).
 - The zero-length segment and section checks crashed with "Validation
   error" on a file whose parent id is larger than every node id.
 - Radii cleaning listed an untouched NaN soma radius as a change.
+- Folder scans counted the hidden `._name.swc` files macOS writes on USB
+  drives and network shares as SWC files, and each one failed. Hidden
+  files are now skipped.
+- The desktop app loaded a downloaded code update even when it was older
+  than the code bundled with the app. It now uses the newer of the two.
 
 ## [0.2.1] - 2026-06-19
 
