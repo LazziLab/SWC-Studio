@@ -1,0 +1,103 @@
+# Changelog
+
+All notable changes to SWC-Studio are recorded here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions
+follow [Semantic Versioning](https://semver.org/).
+
+## [Unreleased]
+
+### Changed
+
+- Auto-labeling now runs the SWC auto-labeler v1.0.0
+  (<https://github.com/Mio0v0/swc-autolabeler>). It has four stages:
+  structural checks, cell class, subtree labeling with a learned branch
+  correction, and a quality flag that ranks cells for review. You can choose
+  the cell class or let Stage 1 decide it, and the Flag Review window lists
+  every cell, riskiest first. The earlier graph-network stages and their
+  models are removed, so auto-labeling runs on the CPU alone.
+- `history export-crate` now replaces each OS username with a stable
+  pseudonym (`agent-1`, `agent-2`, ...) in the copied event log, the index,
+  the SWC's `@PROV` header and the crate metadata, unless you pass
+  `--with-pii`. Before, usernames were only removed from the crate metadata.
+- A model folder chosen with `--model-dir` is recorded in a file's history
+  with the home directory written as `~`, and model lookup expands `~`.
+- `history verify` also recomputes every commit id, checks that each
+  parent is an earlier commit, that branches and tags point into the log,
+  that every blob they reach is present, and that the files match
+  `checksums.json`.
+
+### Fixed
+
+- A failing check with severity `info` (such as `no_node_id_gaps`) was
+  shown as a critical issue. It is now reported as `info`.
+- `radius_upper_bound` was missing from the check catalog, so it had no
+  category, label or rule text when enabled.
+- A source checkout that is not installed reported version 0.1.0, and the
+  docs fell back to 0.2.0. Both now read the version from `pyproject.toml`.
+
+## [0.2.1] - 2026-06-19
+
+### Added
+
+- Per-file provenance history. Every edit, from the GUI, the CLI or a batch,
+  is recorded in a `<stem>_history.swcstudio` archive next to the SWC. The
+  archive holds an append-only event log, a content-addressed blob store,
+  branches and tags, and an SQLite index. Auto-label runs also record the
+  model and a fingerprint of the software environment.
+- `swcstudio history` commands (`log`, `show`, `checkout`, `branch`,
+  `switch`, `tag`, `checkpoint`, `reproduce`, `reindex`, `verify`, `gc`,
+  `export-crate`) and a History Browser with Revert and Checkout in the
+  GUI.
+- A quality flag for auto-labeling that marks the cells most likely to be
+  mislabeled.
+
+### Fixed
+
+- A segmentation fault in auto-label inference on macOS, caused by two
+  OpenMP runtimes loaded in one process.
+- Installation on clean Linux, macOS and Windows hosts. CI now installs and
+  tests the wheel on all three with Python 3.10, 3.11 and 3.12.
+
+## [0.2.0] - 2026-05-07
+
+### Added
+
+- Machine-learning auto-labeling of soma, axon, basal and apical dendrite,
+  with the models bundled in the app and the wheel. It runs on a worker
+  thread with a progress bar.
+- Modular updates: releases ship separate runtime, code and model layers,
+  and Help → Check for Updates downloads only the layer that changed.
+- A release workflow that builds the macOS and Windows apps and publishes
+  the wheel to PyPI.
+
+### Changed
+
+- The documentation site was reorganized around three install paths:
+  bundled app, `pip`, and source.
+
+### Fixed
+
+- Unreadable GUI colors under Windows dark mode.
+
+## [0.1.0] - 2026-04-01
+
+First public release.
+
+### Added
+
+- Issue-driven validation: native checks plus checks from NeuroM, each
+  linked to the tool that repairs it, in the GUI and the CLI.
+- Repairs and editing tools: soma consolidation, splitting of multi-soma
+  files, index cleaning, radii cleaning, Ramer–Douglas–Peucker
+  simplification, and manual editing of geometry, labels and radii.
+- Batch processing of whole folders.
+- A plugin system for adding or replacing feature methods and validation
+  checks.
+- One shared backend behind the desktop GUI, the `swcstudio` CLI and the
+  Python API.
+- Bundled desktop apps for macOS and Windows, and a documentation site.
+
+[Unreleased]: https://github.com/Mio0v0/SWC-Studio/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Mio0v0/SWC-Studio/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/Mio0v0/SWC-Studio/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/Mio0v0/SWC-Studio/releases/tag/v0.1.0

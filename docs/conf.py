@@ -14,7 +14,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(DOCS_DIR, ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
 project = "SWC-Studio"
-author = "SWC-Studio Contributors"
+author = "Xinran Shi"
 copyright = f"{datetime.now():%Y}, {author}"
 
 try:

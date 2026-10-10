@@ -7,14 +7,16 @@ automated by `.github/workflows/release.yml`.
 ## Quick recipe
 
 ```bash
-# 1. Bump the version locally (one source of truth → updater + pyproject)
+# 1. Bump the version locally (one source of truth → updater, pyproject, CITATION.cff)
 python scripts/stamp_version.py --version 0.2.0
+#    Then set date-released in CITATION.cff and move the Unreleased
+#    entries in CHANGELOG.md under the new version.
 
 # 2. Verify the bump took effect
 python scripts/stamp_version.py --version 0.2.0 --check
 
 # 3. Commit + push
-git add pyproject.toml swcstudio/core/updater.py
+git add pyproject.toml swcstudio/core/updater.py CITATION.cff CHANGELOG.md
 git commit -m "Bump version to 0.2.0"
 git push origin <your-branch>
 

@@ -2,12 +2,14 @@
 """Synchronise version strings across the repo from a single source.
 
 The release workflow runs this with ``--version 0.2.0`` (parsed from
-the git tag). It updates three places so the produced wheel and
-bundled .app advertise the right version at runtime:
+the git tag). It updates these places so the produced wheel and
+bundled .app advertise the right version at runtime, and so the
+citation metadata names the release:
 
 * ``pyproject.toml``                — ``version = "..."``
 * ``swcstudio/core/updater.py``     — ``BUNDLED_APP_VERSION``,
                                        ``BUNDLED_MODELS_VERSION``
+* ``CITATION.cff``                  — ``version: "..."``
 
 This script is idempotent and only edits the lines it owns. It does
 NOT commit; the workflow runs it in the throw-away release working
@@ -46,6 +48,11 @@ TARGETS = [
     (
         "swcstudio/core/updater.py",
         re.compile(r'^(BUNDLED_MODELS_VERSION\s*=\s*)"[^"]+"', re.MULTILINE),
+        r'\1"{version}"',
+    ),
+    (
+        "CITATION.cff",
+        re.compile(r'^(version:\s*)"[^"]+"', re.MULTILINE),
         r'\1"{version}"',
     ),
 ]
