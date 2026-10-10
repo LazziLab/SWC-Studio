@@ -184,14 +184,18 @@ class UpdateManifest:
 def current_app_version() -> str:
     """Return the currently-loaded swcstudio code version.
 
-    Priority: VERSION file inside override dir > BUNDLED_APP_VERSION.
+    Priority: VERSION file inside override dir > BUNDLED_APP_VERSION. An
+    override older than the bundled code is not loaded (the bootstrap
+    skips it), so it is not reported either.
     """
     override_version = user_app_override_dir() / "VERSION"
     if app_updates_supported() and override_version.is_file():
         try:
-            return override_version.read_text(encoding="utf-8").strip()
+            version = override_version.read_text(encoding="utf-8").strip()
         except OSError:
-            pass
+            version = ""
+        if version and not _is_newer(BUNDLED_APP_VERSION, version):
+            return version
     return BUNDLED_APP_VERSION
 
 
