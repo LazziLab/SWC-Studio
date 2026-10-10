@@ -29,7 +29,11 @@ from swcstudio.core.reporting import (
     timestamp_slug,
     write_text_report,
 )
-from swcstudio.core.swc_io import parse_swc_text_preserve_tokens, write_swc_to_bytes_preserve_tokens
+from swcstudio.core.swc_io import (
+    is_swc_data_file,
+    parse_swc_text_preserve_tokens,
+    write_swc_to_bytes_preserve_tokens,
+)
 from swcstudio.plugins.registry import register_builtin_method, resolve_method
 
 TOOL = "batch_processing"
@@ -104,7 +108,7 @@ def get_config() -> dict[str, Any]:
 
 
 def _list_swc_files(folder: Path) -> list[Path]:
-    return sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() == ".swc")
+    return sorted(p for p in folder.iterdir() if is_swc_data_file(p))
 
 
 def _normalize_method_output(method_out: Any, input_df: pd.DataFrame) -> tuple[pd.DataFrame, int, list[dict[str, Any]]]:

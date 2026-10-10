@@ -30,6 +30,7 @@ from swcstudio.core.auto_typing import (
     save_config as save_auto_typing_config,
 )
 from swcstudio.core.config import feature_config_path
+from swcstudio.core.swc_io import is_swc_data_file
 from swcstudio.tools.batch_processing.features.batch_validation import validate_folder as run_batch_validation
 from swcstudio.tools.batch_processing.features.index_clean import run_folder as run_batch_index_clean
 from swcstudio.tools.batch_processing.features.simplification import run_folder as run_batch_simplification
@@ -630,7 +631,7 @@ class BatchTabWidget(QWidget):
 
         swc_files = [
             f for f in os.listdir(folder_path)
-            if f.lower().endswith(".swc") and os.path.isfile(os.path.join(folder_path, f))
+            if is_swc_data_file(os.path.join(folder_path, f))
         ]
         if not swc_files:
             self._set_status(

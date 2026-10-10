@@ -1,4 +1,7 @@
 import io
+import os
+from collections.abc import Iterable
+
 import numpy as np
 import pandas as pd
 
@@ -6,6 +9,20 @@ import pandas as pd
 
 SWC_COLS = ["id", "type", "x", "y", "z", "radius", "parent"]
 SWC_HEADER_ATTR = "swc_header_lines"
+
+
+def is_swc_data_file(path: str | os.PathLike, extensions: Iterable[str] = (".swc",)) -> bool:
+    """True for a regular, visible file with an SWC extension.
+
+    Folder scans use this so they skip hidden files, in particular the
+    ``._name.swc`` AppleDouble files macOS writes next to every file it
+    copies to a USB drive or network share: they hold Finder metadata,
+    not SWC rows, and would otherwise fail as unreadable SWC files.
+    """
+    name = os.path.basename(os.fspath(path))
+    suffix = os.path.splitext(name)[1].lower()
+    exts = {str(e).lower() for e in extensions}
+    return suffix in exts and not name.startswith(".") and os.path.isfile(path)
 
 
 def _default_swc_plus_header() -> list[str]:

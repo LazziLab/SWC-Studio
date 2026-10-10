@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from swcstudio.core.swc_io import is_swc_data_file
 from swcstudio.core.model_paths import (
     MODEL_FILES,
     available_models,
@@ -635,7 +636,7 @@ def run_batch(
     """
     model_folder = _model_folder(model_dir)
     in_dir = Path(folder)
-    swc_files = sorted(p for p in in_dir.iterdir() if p.is_file() and p.suffix.lower() == ".swc")
+    swc_files = sorted(p for p in in_dir.iterdir() if is_swc_data_file(p))
     run_timestamp = timestamp_slug()
     out_dir = operation_output_dir_for_folder(in_dir, "batch_auto_typing", timestamp=run_timestamp)
 

@@ -12,6 +12,7 @@ from swcstudio.core.reporting import (
     timestamp_slug,
     write_text_report,
 )
+from swcstudio.core.swc_io import is_swc_data_file
 from swcstudio.core.validation_engine import run_validation_text
 from swcstudio.plugins.registry import register_builtin_method, resolve_method
 
@@ -56,7 +57,7 @@ def validate_folder(folder: str, *, config_overrides: dict | None = None) -> dic
         raise NotADirectoryError(folder)
 
     exts = {e.lower() for e in cfg.get("include", {}).get("extensions", [".swc"])}
-    swc_files = sorted(p for p in in_dir.iterdir() if p.is_file() and p.suffix.lower() in exts)
+    swc_files = sorted(p for p in in_dir.iterdir() if is_swc_data_file(p, extensions=exts))
 
     rows: list[dict[str, Any]] = []
     failures = []

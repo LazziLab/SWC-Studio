@@ -22,6 +22,7 @@ from swcstudio.core.reporting import (
     timestamp_slug,
     write_text_report,
 )
+from swcstudio.core.swc_io import is_swc_data_file
 from swcstudio.core.validation import _split_swc_by_soma_roots
 from swcstudio.plugins.registry import register_builtin_method, resolve_method
 
@@ -67,7 +68,7 @@ def split_folder(folder: str, *, config_overrides: dict | None = None) -> dict[s
     if not in_dir.exists() or not in_dir.is_dir():
         raise NotADirectoryError(folder)
 
-    swc_files = sorted(p for p in in_dir.iterdir() if p.is_file() and p.suffix.lower() == ".swc")
+    swc_files = sorted(p for p in in_dir.iterdir() if is_swc_data_file(p))
     files_split = 0
     files_skipped = 0
     trees_saved = 0

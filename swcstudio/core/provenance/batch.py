@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from swcstudio.core.provenance.ops import OpKind
 from swcstudio.core.provenance.tracked_op import tracked_op
+from swcstudio.core.swc_io import is_swc_data_file
 
 BatchTransform = Callable[[Path, str], dict[str, Any]]
 BatchParams = Callable[[Path, dict[str, Any]], dict[str, Any]]
@@ -50,7 +51,7 @@ def run_tracked_batch(
         [
             path
             for path in folder_path.iterdir()
-            if path.is_file() and path.suffix.lower() == ".swc"
+            if is_swc_data_file(path)
         ],
         key=lambda path: path.name.lower(),
     )

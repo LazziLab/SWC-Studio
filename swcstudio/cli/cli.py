@@ -13,7 +13,11 @@ from pathlib import Path
 
 from swcstudio.core.auto_typing import BatchOptions
 from swcstudio.core.config import merge_config
-from swcstudio.core.swc_io import parse_swc_text_preserve_tokens, write_swc_to_bytes_preserve_tokens
+from swcstudio.core.swc_io import (
+    is_swc_data_file,
+    parse_swc_text_preserve_tokens,
+    write_swc_to_bytes_preserve_tokens,
+)
 from swcstudio.core.issues import build_issue_list
 from swcstudio.plugins import (
     autoload_plugins_from_environment,
@@ -114,7 +118,7 @@ def _tracked_batch(
     from swcstudio.core.provenance import tracked_op
 
     swcs = sorted(
-        [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() == ".swc"],
+        [p for p in folder.iterdir() if is_swc_data_file(p)],
         key=lambda p: p.name.lower(),
     )
     if not swcs:
@@ -956,7 +960,7 @@ def main(argv: list[str] | None = None) -> int:
             out_dir.mkdir(parents=True, exist_ok=True)
 
             swcs = sorted(
-                [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() == ".swc"],
+                [p for p in folder.iterdir() if is_swc_data_file(p)],
                 key=lambda p: p.name.lower(),
             )
             if not swcs:
@@ -1059,7 +1063,7 @@ def main(argv: list[str] | None = None) -> int:
             if not folder.is_dir():
                 raise NotADirectoryError(str(folder))
             swc_files = sorted(
-                [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() == ".swc"],
+                [p for p in folder.iterdir() if is_swc_data_file(p)],
                 key=lambda p: p.name.lower(),
             )
             if not swc_files:
