@@ -34,6 +34,16 @@ follow [Semantic Versioning](https://semver.org/).
   category, label or rule text when enabled.
 - A source checkout that is not installed reported version 0.1.0, and the
   docs fell back to 0.2.0. Both now read the version from `pyproject.toml`.
+- Geometry Editing in the GUI could not select anything (node, subtree,
+  path, ...) since v0.2.0: every selection failed with an internal
+  `TypeError` that was only written to the log.
+- Geometry edits rewrote the number text of every row (for example
+  `2.5000e+00` became `2.5`), and Index Clean replaced the file's own
+  header with the default SWC+ header. Both now keep the header and the
+  original text of every value they do not change.
+- The zero-length segment and section checks crashed with "Validation
+  error" on a file whose parent id is larger than every node id.
+- Radii cleaning listed an untouched NaN soma radius as a change.
 
 ## [0.2.1] - 2026-06-19
 
