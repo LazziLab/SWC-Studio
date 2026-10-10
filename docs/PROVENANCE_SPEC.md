@@ -66,9 +66,14 @@ Inside neuron_001_history.swcstudio after SWC-Studio decrypts/materializes it:
   removes the work tree.
 - SWC-Studio writes/reads the archive with AES zip encryption through
   `pyzipper`. By default it uses an app-managed password so the sidecar
-  is not a normal user-editable zip folder. Advanced users can set
-  `SWCSTUDIO_HISTORY_PASSWORD` to override the password for a controlled
-  workflow.
+  is not a normal user-editable zip folder. That password ships with
+  SWC-Studio, so the default encryption deters casual hand edits but
+  does **not** keep the history confidential: anyone with SWC-Studio or
+  its source can open the archive. Integrity does not rest on the
+  password. Blobs are addressed by their SHA-256, commit ids hash their
+  parent and content (§4), and `swcstudio history verify` re-checks
+  both. Set `SWCSTUDIO_HISTORY_PASSWORD` to your own secret when the
+  history must stay private; every reader then needs the same value.
 - Legacy `<stem>_history.swcstudio.zip` archives can still be opened and
   are rewritten to the current `<stem>_history.swcstudio` name on the
   next commit.
@@ -564,7 +569,7 @@ swcstudio history init <file>
 | `checkpoint` | Materialize a past operation/state as a labeled `.swc` next to the source SWC. |
 | `reproduce` | Emit a `reproduce.yaml` so a colleague can recompute an AI result. |
 | `reindex` | Rebuild `index.sqlite` from `events.jsonl`. |
-| `verify` | Hash-check every blob; report mismatches. |
+| `verify` | Hash-check every blob; recompute every commit id and check that its parent is an earlier commit; check that branches and tags point into the log, that every blob they reach is present, and that the files match `checksums.json`. Exits non-zero on any problem. |
 | `gc` | Remove unreferenced blobs from `objects/`. |
 | `export-crate` | Bundle file + history + AI metadata as an RO-Crate directory. |
 | `init` | Initialize history explicitly and migrate a legacy output sidecar when present. |
@@ -712,16 +717,29 @@ equivalent) instead.
     reproduce/<reproduce.yaml per AI run>
 ```
 
-By default the export **strips**: hostnames, absolute filesystem
-paths, OS usernames (replaced by stable opaque IDs). `--with-pii`
-opts in to including them.
+By default the export replaces every OS username with a pseudonym,
+`agent-1`, `agent-2`, ... numbered in order of first appearance in
+the log, so re-exporting the same history gives the same pseudonyms.
+The replacement covers the crate metadata, the copied `events.jsonl`
+and `index.sqlite`, and the `actor=` field of the copied SWC's `@PROV`
+header; `history/checksums.json` is recomputed to match. Commit ids do
+not hash the actor (§4), so the exported log still verifies.
+`--with-pii` keeps the real usernames.
+
+Hostnames are never recorded. The one filesystem path the history can
+hold is a model folder chosen with `--model-dir`. It is stored with the
+home directory written as `~` (model lookup expands it again), so a
+folder under the home directory does not reveal the username. The path
+is part of the operation's parameters, which the commit id hashes, so
+the export cannot rewrite it; a folder outside the home directory is
+exported as given.
 
 ---
 
 ## Open items deferred to implementation
 
 - **Compression level** — start at zstd level 3, revisit after measuring.
-- **Snapshot interval** — fixed at 50 ops; tunable via config later.
+- **Snapshots** — not written in v1; `checkout` replays inverse diffs (§9).
 - **GC policy** — manual only in v1; auto-gc deferred.
 - **RNG seed handling** — capture-only in v1; enforced-set deferred.
 - **`lab_user`** — reserved field, not collected in v1.
