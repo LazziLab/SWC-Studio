@@ -7,7 +7,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from swcstudio.core.auto_typing.runner import flag_record, label_warnings, write_flag_review
-from swcstudio.core.provenance import OpKind, run_tracked_batch
+from swcstudio.core.provenance import (
+    OpKind,
+    history_dir_for,
+    iter_events,
+    open_history_for_read,
+    run_tracked_batch,
+)
 
 
 def _labeled(cell_type: str) -> SimpleNamespace:
@@ -61,6 +67,24 @@ class BatchFailureMessageTests(unittest.TestCase):
 
             out = run_tracked_batch(folder, kind=OpKind.AUTO_LABEL, transform=transform)
         self.assertEqual(sorted(out["failures"]), ["a.swc: QC rejected; no neurite", "b.swc: boom"])
+
+    def test_failure_does_not_change_later_commit_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            for name in ("a.swc", "b.swc"):
+                (folder / name).write_text("1 1 0 0 0 1 -1\n2 3 1 0 0 1 1\n", encoding="utf-8")
+
+            def transform(path: Path, text: str):
+                if path.name == "a.swc":
+                    raise ValueError("boom")
+                return {"bytes": text.replace("2 3 ", "2 2 ").encode("utf-8")}
+
+            out = run_tracked_batch(folder, kind=OpKind.SET_TYPE, transform=transform,
+                                    message="batch relabel")
+            self.assertEqual(out["failures"], ["a.swc: boom"])
+            with open_history_for_read(folder / "b.swc", history_dir_for(folder / "b.swc")) as hist:
+                messages = [event.message for event in iter_events(hist / "events.jsonl")]
+        self.assertEqual(messages, ["batch relabel"])
 
 
 if __name__ == "__main__":

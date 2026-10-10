@@ -95,9 +95,9 @@ def run_tracked_batch(
             if summary_for is not None:
                 per_file.append(summary_for(swc_path, result))
         except Exception as exc:  # noqa: BLE001
-            message = str(exc)
+            error = str(exc)
             prefix = f"{swc_path.name}: "
-            failures.append(message if message.startswith(prefix) else prefix + message)
+            failures.append(error if error.startswith(prefix) else prefix + error)
 
     return {
         "folder": str(folder_path),
