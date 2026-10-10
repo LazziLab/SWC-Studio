@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- File → Open accepts several files at once, each opening in its own tab;
+  a file that is already open switches to its tab instead of opening
+  twice. Window → Next File / Previous File (Ctrl+Tab / Ctrl+Shift+Tab)
+  move between open files.
+- Flag Review: Open Cell opens every selected cell, Previous / Next step
+  through the ranked list, and a Warnings column shows cells missing a
+  compartment.
+- A node-type color legend in the 3D view (View → Show Node-Type Legend).
+
 ### Changed
 
 - Auto-labeling now runs the SWC auto-labeler v1.0.0
