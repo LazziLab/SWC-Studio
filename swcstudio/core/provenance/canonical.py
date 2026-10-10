@@ -75,6 +75,7 @@ def canonical_swc(data: bytes) -> bytes:
     # the terminator. Re-joining with ``\n`` guarantees a single
     # consistent line ending in the output regardless of input OS.
     text = data.decode("utf-8")
+    had_bom = text.startswith("\ufeff")
 
     out_lines: list[str] = []
     for line in text.splitlines():
@@ -83,7 +84,8 @@ def canonical_swc(data: bytes) -> bytes:
         # intentionally and we promised "pass-through" semantics for
         # everything we don't explicitly normalize.
         line = line.rstrip()
-        if line.startswith(_PROV_PREFIX):
+        # A byte-order mark may precede the first @PROV line.
+        if line.lstrip("\ufeff").startswith(_PROV_PREFIX):
             # See module docstring on why @PROV lines are excluded.
             continue
         out_lines.append(line)
@@ -92,7 +94,12 @@ def canonical_swc(data: bytes) -> bytes:
     # adding or removing a final newline would change the hash, which
     # is exactly the kind of cosmetic difference canonicalization is
     # supposed to absorb.
-    return ("\n".join(out_lines) + "\n").encode("utf-8")
+    out = "\n".join(out_lines) + "\n"
+    # Keep a leading byte-order mark even when it sat on a @PROV line, so
+    # a file hashes the same whether its header is above or below the mark.
+    if had_bom and not out.startswith("\ufeff"):
+        out = "\ufeff" + out
+    return out.encode("utf-8")
 
 
 def sha256_hex(data: bytes) -> str:
