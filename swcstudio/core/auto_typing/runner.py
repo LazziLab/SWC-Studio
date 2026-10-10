@@ -423,14 +423,36 @@ def _flag_summary(flag_result: dict[str, Any] | None) -> str:
 # ---------------------------------------------------------------------------
 
 
+def label_warnings(cell_type: str | None, out_type_counts: dict[int, int] | None) -> list[str]:
+    """The compartments a labeled cell of its class should have but has no node of.
+
+    The labeler gives each primary subtree one label and does not force an
+    axon, so a cell can come back without one. Saying so in the batch results
+    spares reviewers from finding it by eye.
+    """
+    if out_type_counts is None:
+        return []
+    if cell_type == "pyramidal":
+        expected = {2: "axon", 3: "basal dendrite", 4: "apical dendrite"}
+    else:
+        expected = {2: "axon", 3: "dendrite"}
+    return [f"no {name} labeled" for t, name in expected.items() if int(out_type_counts.get(t, 0)) == 0]
+
+
+def _warning_text(record: dict[str, Any]) -> str:
+    warnings = list(record.get("warnings") or [])
+    return f", WARNING: {'; '.join(warnings)}" if warnings else ""
+
+
 def flag_record(path: Path, out_path: Path | None, labeled: Any | None,
                 nodes_total: int, type_changes: int, qc_reasons: list[str] | None = None,
-                error: str | None = None) -> dict[str, Any]:
+                error: str | None = None, out_type_counts: dict[int, int] | None = None) -> dict[str, Any]:
     """One row of a batch's flag review.
 
     ``labeled`` is a :class:`FileResult` (or the runner's internal equivalent) for
     a labeled file, or ``None`` for a file that was not labeled, with
-    ``qc_reasons`` or ``error`` saying why.
+    ``qc_reasons`` or ``error`` saying why. ``out_type_counts`` (node count per
+    output type) defaults to ``labeled.out_type_counts`` and feeds ``warnings``.
     """
     rec: dict[str, Any] = {
         "file": path.name, "input_path": str(path),
@@ -442,7 +464,7 @@ def flag_record(path: Path, out_path: Path | None, labeled: Any | None,
         "stage1_cell_type": None, "stage1_confidence": None, "class_mismatch": False,
         "predicted_f1": None, "suspicion": None, "threshold": None,
         "flagged_by_threshold": False, "flagged": False, "flag_reason": None,
-        "rank_in_class": None, "class_size": None, "notes": [],
+        "rank_in_class": None, "class_size": None, "notes": [], "warnings": [],
     }
     if labeled is not None:
         fr = getattr(labeled, "flag_result", None) or {}
@@ -455,6 +477,8 @@ def flag_record(path: Path, out_path: Path | None, labeled: Any | None,
             flagged_by_threshold=bool(fr.get("flagged_by_threshold")),
             notes=list(getattr(labeled, "notes", []) or []),
         )
+        counts = out_type_counts if out_type_counts is not None else getattr(labeled, "out_type_counts", None)
+        rec["warnings"] = label_warnings(labeled.cell_type, counts)
     return rec
 
 
@@ -494,7 +518,7 @@ def apply_flag_budget(records: list[dict[str, Any]], budget: float) -> None:
                 rec["flag_reason"] = "below_cutoff" if rec["flagged"] else None
 
 
-_CSV_FIELDS = ("file", "flagged", "flag_reason", "cell_class", "cell_class_source", "stage1_cell_type",
+_CSV_FIELDS = ("file", "flagged", "flag_reason", "warnings", "cell_class", "cell_class_source", "stage1_cell_type",
                "stage1_confidence", "class_mismatch", "predicted_f1", "suspicion", "rank_in_class",
                "class_size", "nodes", "type_changes", "labeled", "qc_passed", "qc_reasons", "error",
                "review_status", "input_path", "output_path")
@@ -519,6 +543,7 @@ def write_flag_review(json_path: Path, records: list[dict[str, Any]], *, budget:
         for rec in records:
             row = dict(rec)
             row["qc_reasons"] = "; ".join(rec.get("qc_reasons") or [])
+            row["warnings"] = "; ".join(rec.get("warnings") or [])
             writer.writerow(row)
     return json_path
 
@@ -679,8 +704,9 @@ def run_batch(
             total_nodes += len(rows)
             total_type_changes += type_changes
             total_radius_changes += radius_changes
-            records.append(flag_record(swc_path, out_path, labeled, len(rows), type_changes))
             out_counts = _out_counts(types)
+            records.append(flag_record(swc_path, out_path, labeled, len(rows), type_changes,
+                                       out_type_counts=out_counts))
             per_file.append(
                 f"{swc_path.name}: nodes={len(rows)}, type_changes={type_changes}, "
                 f"radius_changes={radius_changes}, cell_class={cell_class_name(labeled.cell_type)} "
@@ -688,6 +714,7 @@ def run_batch(
                 f"{_flag_summary(labeled.flag_result)}, "
                 f"out_types(soma/axon/basal/apic)={out_counts[1]}/{out_counts[2]}/"
                 f"{out_counts[3]}/{out_counts[4]}"
+                f"{_warning_text(records[-1])}"
             )
             change_details.extend(_build_change_details(swc_path.name, rows, orig_types, types,
                                                         orig_radii, radii))

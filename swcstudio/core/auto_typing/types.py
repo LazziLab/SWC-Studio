@@ -44,6 +44,8 @@ class BatchResult:
     log_path: str | None
     files_flagged: int = 0
     files_qc_failed: int = 0
+    # Labeled files missing a compartment their cell class should have.
+    files_with_warnings: int = 0
     commits: list[dict[str, Any]] | None = None
     # One record per labeled file, for the Flag Review window (see ``flag_review``).
     flag_records: list[dict[str, Any]] | None = None

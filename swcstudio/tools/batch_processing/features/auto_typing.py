@@ -24,10 +24,10 @@ from swcstudio.core.auto_typing import (
     get_config as _get_engine_config,
     write_flag_review,
 )
-from swcstudio.core.auto_typing.runner import flag_record
+from swcstudio.core.auto_typing.runner import _warning_text, flag_record
 from swcstudio.core.config import merge_config
 from swcstudio.core.provenance import OpKind, config_params, run_tracked_batch
-from swcstudio.core.reporting import operation_report_path_for_folder, timestamp_slug
+from swcstudio.core.reporting import operation_report_path_for_folder, timestamp_slug, write_text_report
 from swcstudio.plugins.registry import register_builtin_method
 
 TOOL = "batch_processing"
@@ -69,7 +69,8 @@ def _builtin_run(folder: str, options: BatchOptions, config: dict[str, Any]):
         totals["type_changes"] += int(result.get("type_changes", 0))
         totals["radius_changes"] += int(result.get("radius_changes", 0))
         records.append(flag_record(Path(path), Path(path), result.get("result_obj"),
-                                   int(result.get("nodes_total", 0)), int(result.get("type_changes", 0))))
+                                   int(result.get("nodes_total", 0)), int(result.get("type_changes", 0)),
+                                   out_type_counts=out_counts))
         source = "user" if result.get("cell_type_source") == "user" else "auto"
         return (
             f"{path.name}: nodes={int(result.get('nodes_total', 0))}, "
@@ -80,6 +81,7 @@ def _builtin_run(folder: str, options: BatchOptions, config: dict[str, Any]):
             "out_types(soma/axon/basal/apic)="
             f"{out_counts.get(1, 0)}/{out_counts.get(2, 0)}/"
             f"{out_counts.get(3, 0)}/{out_counts.get(4, 0)}"
+            f"{_warning_text(records[-1])}"
         )
 
     run_timestamp = timestamp_slug()
@@ -124,6 +126,30 @@ def _builtin_run(folder: str, options: BatchOptions, config: dict[str, Any]):
         flag_review_path = str(write_flag_review(review, records, budget=budget, folder=str(folder_path),
                                                  timestamp=run_timestamp))
 
+    files_qc_failed = sum("QC rejected" in str(item) for item in failures)
+    files_with_warnings = sum(1 for r in records if r.get("warnings"))
+    per_file = list(tracked.get("per_file", []) or [])
+    # The GUI shows a shortened list; the report keeps every file and error.
+    report_lines = [
+        "Auto-labeling batch report",
+        f"Folder: {folder_path}",
+        f"SWC files: {int(tracked['files_total'])}",
+        f"Labeled: {int(tracked['files_processed'])}",
+        f"Labeled with warnings: {files_with_warnings}",
+        f"Not labeled: {len(failures)} ({files_qc_failed} failed the structural checks, "
+        f"{len(failures) - files_qc_failed} errors)",
+        "",
+        "Per file:",
+        *per_file,
+        "",
+        "Not labeled:",
+        *(failures or ["(none)"]),
+    ]
+    log_path = write_text_report(
+        operation_report_path_for_folder(folder_path, "batch_auto_typing", timestamp=run_timestamp),
+        "\n".join(report_lines) + "\n",
+    )
+
     return BatchResult(
         folder=str(tracked["folder"]),
         out_dir=None,
@@ -131,14 +157,15 @@ def _builtin_run(folder: str, options: BatchOptions, config: dict[str, Any]):
         files_total=int(tracked["files_total"]),
         files_processed=int(tracked["files_processed"]),
         files_failed=int(tracked["files_failed"]),
-        files_qc_failed=sum("QC rejected" in str(item) for item in failures),
+        files_qc_failed=files_qc_failed,
+        files_with_warnings=files_with_warnings,
         total_nodes=int(totals["nodes"]),
         total_type_changes=int(totals["type_changes"]),
         total_radius_changes=int(totals["radius_changes"]),
         files_flagged=files_flagged,
         failures=failures,
-        per_file=list(tracked.get("per_file", []) or []),
-        log_path=None,
+        per_file=per_file,
+        log_path=log_path,
         commits=list(tracked.get("commits", []) or []),
         flag_records=records if flag_review_path else None,
         flag_review_path=flag_review_path,

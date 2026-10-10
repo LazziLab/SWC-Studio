@@ -1084,7 +1084,7 @@ def main(argv: list[str] | None = None) -> int:
                 cell_class_name,
                 write_flag_review,
             )
-            from swcstudio.core.auto_typing.runner import flag_record  # noqa: PLC0415
+            from swcstudio.core.auto_typing.runner import _warning_text, flag_record  # noqa: PLC0415
             from swcstudio.core.reporting import operation_report_path_for_folder, timestamp_slug  # noqa: PLC0415
             run_timestamp = timestamp_slug()
 
@@ -1147,7 +1147,8 @@ def main(argv: list[str] | None = None) -> int:
                 total_type_changes += int(out.get("type_changes", 0))
                 total_radius_changes += int(out.get("radius_changes", 0))
                 records.append(flag_record(swc_path, swc_path, out.get("result_obj"),
-                                           int(out.get("nodes_total", 0)), int(out.get("type_changes", 0))))
+                                           int(out.get("nodes_total", 0)), int(out.get("type_changes", 0)),
+                                           out_type_counts=out_counts))
                 commits.append(
                     {
                         "file": swc_path.name,
@@ -1166,6 +1167,7 @@ def main(argv: list[str] | None = None) -> int:
                     + f"out_types(soma/axon/basal/apic)="
                     f"{out_counts.get(1, 0)}/{out_counts.get(2, 0)}/"
                     f"{out_counts.get(3, 0)}/{out_counts.get(4, 0)}"
+                    + _warning_text(records[-1])
                 )
 
             flag_review_path = None

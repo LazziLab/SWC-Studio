@@ -43,6 +43,16 @@ from .radii_cleaning_panel import RadiiCleaningPanel
 _CFG_PATH = feature_config_path("batch_processing", "auto_typing")
 
 
+def _not_labeled_line(result: object) -> str:
+    # Structural-check rejections are part of the failures, not extra to them.
+    failed = int(getattr(result, "files_failed", 0) or 0)
+    qc = int(getattr(result, "files_qc_failed", 0) or 0)
+    line = f"Not labeled: {failed}"
+    if failed:
+        line += f" ({qc} failed the structural checks, {failed - qc} errors)"
+    return line
+
+
 class _AutoTypingConfigDialog(QDialog):
     """On-demand JSON editor for batch auto-typing config."""
 
@@ -727,9 +737,9 @@ class BatchTabWidget(QWidget):
             f"Folder: {getattr(result, 'folder', '')}",
             "Each processed source file was updated and recorded in its own history.",
             f"SWC files detected: {getattr(result, 'files_total', 0)}",
-            f"Processed: {getattr(result, 'files_processed', 0)}",
-            f"QC rejected: {getattr(result, 'files_qc_failed', 0)}",
-            f"Failed: {getattr(result, 'files_failed', 0)}",
+            f"Labeled: {getattr(result, 'files_processed', 0)}",
+            f"Labeled with warnings (a compartment is missing): {getattr(result, 'files_with_warnings', 0)}",
+            _not_labeled_line(result),
             f"Total nodes processed: {getattr(result, 'total_nodes', 0)}",
             f"Type changes: {getattr(result, 'total_type_changes', 0)}",
             f"Radius changes: {getattr(result, 'total_radius_changes', 0)}",
@@ -750,12 +760,12 @@ class BatchTabWidget(QWidget):
             lines.append("Per-file summary:")
             lines.extend(per_file[:25])
             if len(per_file) > 25:
-                lines.append(f"... ({len(per_file) - 25} more)")
+                lines.append(f"... ({len(per_file) - 25} more in the report file)")
         failures = list(getattr(result, "failures", []) or [])
         if failures:
             lines.append("")
-            lines.append("Errors:")
-            lines.extend(failures[:10])
+            lines.append("Not labeled:")
+            lines.extend(failures)
         log_path = getattr(result, "log_path", None)
         if log_path:
             lines.extend(["", f"Report file: {log_path}"])
