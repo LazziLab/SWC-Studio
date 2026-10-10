@@ -16,6 +16,13 @@ follow [Semantic Versioning](https://semver.org/).
   through the ranked list, and a Warnings column shows cells missing a
   compartment.
 - A node-type color legend in the 3D view (View → Show Node-Type Legend).
+- Three validation checks under "File integrity", which run first:
+  `no_duplicate_node_ids`, `no_parent_cycles` and `no_missing_parents`
+  (a parent ID that names no node). There are now 32 checks.
+- Auto-label runs record which models labeled the file: the model folder
+  (home directory written as `~`), where it was found, the labeler version
+  and a SHA-256 of the model files. `history reproduce` uses them.
+- File → Reload from Disk.
 
 ### Changed
 
@@ -50,6 +57,25 @@ follow [Semantic Versioning](https://semver.org/).
 - The macOS install steps cover macOS 15, where an app Apple has not
   notarized must be allowed in System Settings → Privacy & Security →
   Open Anyway.
+- Auto-labeling a file in place changes only the type field of each node
+  line (and the radius field when a radius option changes it); comments,
+  extra columns, spacing, line endings and a byte-order mark are kept as
+  they were. Type and radius edits in the GUI do the same.
+- Files with duplicate node IDs, a node that is its own parent, or a
+  parent loop are refused before auto-labeling, and Index Clean, the
+  geometry edits and Split refuse them instead of dropping or rewiring
+  rows.
+- Nodes on a branch the labeler leaves out (type 0 or a custom type with
+  no standard type below it) keep their type, with a warning, instead of
+  being written as soma.
+- Consolidate Soma gives the merged soma the radius of the sphere with
+  the soma points' surface, as the labeler does. A standard 3-point soma
+  now keeps its radius; before, it was doubled.
+- The model folder is now chosen from, in order: the folder you give,
+  `SWCSTUDIO_MODEL_DIR`, the saved config, the user data folder, then the
+  bundled models (the environment variable now wins over the config).
+- Simplification always keeps soma points and the node where a
+  compartment starts.
 
 ### Fixed
 
@@ -90,6 +116,20 @@ follow [Semantic Versioning](https://semver.org/).
 - After an in-app code update, the desktop app reported, and recorded in
   file histories, the version it was installed with instead of the code
   it runs.
+- `no_ultranarrow_starts` failed with "NeuroM check error: index 1 is out
+  of bounds" on neurites whose first section branches at once (about 11%
+  of NeuroMorpho.Org cells), and the GUI showed the checks as blocked.
+- The GUI batch auto-label recorded a chosen model folder as an absolute
+  path, including the username, in every file's history.
+- The GUI's Index Clean rewrote the number text of renumbered rows.
+- Switching tabs during a validation froze the window for up to 5 s, and
+  a validation slower than that left the tab reading "0 issues".
+- The `@PROV` history header was written above a file's byte-order mark
+  and with `\n` line endings in CRLF files.
+- `swcstudio doctor` failed a valid model set without the optional flag
+  model; checking whether models are available could download them; an
+  unwritable user data folder stopped auto-labeling instead of falling
+  back to the bundled models; and training read macOS `._*.swc` files.
 
 ## [0.2.1] - 2026-06-19
 
