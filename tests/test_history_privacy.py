@@ -13,7 +13,7 @@ from unittest import mock
 
 import zstandard
 
-from swcstudio.cli.cli import _recorded_model_dir
+from swcstudio.core.model_paths import recorded_model_dir as _recorded_model_dir
 from swcstudio.cli.history_cli import _cmd_export_crate
 from swcstudio.core.model_paths import search_dirs
 from swcstudio.core.provenance import OpKind, tracked_op

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from swcstudio import __version__
-from swcstudio.core.model_paths import MODEL_FILES, resolve_model_path
+from swcstudio.core.model_paths import MODEL_FILES, REQUIRED_MODELS, select_model_dir
 
 
 SUPPORTED_PYTHON = ">=3.10,<3.13"
@@ -132,17 +132,28 @@ def check_installation(*, load_models: bool = True) -> dict[str, Any]:
             }
         )
 
+    # The folder auto-labeling would use (never downloaded here). Its three
+    # required files must be present; the quality flag is optional, and a set
+    # without it labels cells but scores no flag.
+    selection = select_model_dir(auto_download=False)
+    model_folder = selection.folder if selection is not None else None
     models = []
     for short_name, filename in MODEL_FILES.items():
-        path = resolve_model_path(short_name, auto_download=False)
+        required = short_name in REQUIRED_MODELS
+        candidate = model_folder / filename if model_folder is not None else None
+        path = candidate if candidate is not None and candidate.is_file() else None
         row: dict[str, Any] = {
             "name": short_name,
             "filename": filename,
-            "ok": path is not None,
+            "required": required,
+            "ok": path is not None or (not required and model_folder is not None),
             "path": str(path) if path is not None else None,
             "loaded": None,
             "error": None,
+            "note": None,
         }
+        if path is None and not required and model_folder is not None:
+            row["note"] = "optional, not in this model folder: cells are labeled but no quality flag is scored"
         if path is not None and load_models:
             try:
                 _load_model(short_name, path)
@@ -192,6 +203,8 @@ def check_installation(*, load_models: bool = True) -> dict[str, Any]:
         "executable": sys.executable,
         "dependencies": dependencies,
         "configs": configs,
+        "model_dir": str(model_folder) if model_folder is not None else None,
+        "model_source": selection.source if selection is not None else None,
         "models": models,
         "gui": gui,
         "model_loading_checked": load_models,
@@ -226,7 +239,12 @@ def format_installation_report(report: dict[str, Any]) -> str:
         lines.append(f"  [{'OK' if row['ok'] else 'MISSING'}] {row['name']}")
 
     lines.extend(["", "Production models:"])
+    if report.get("model_dir"):
+        lines.append(f"  Model folder: {report['model_dir']} ({report.get('model_source')})")
     for row in report["models"]:
+        if row["ok"] and row.get("path") is None and row.get("note"):
+            lines.append(f"  [NOTE] {row['filename']}: {row['note']}")
+            continue
         state = "OK" if row["ok"] else "FAILED"
         detail = row["path"] or "not found"
         if row["error"]:

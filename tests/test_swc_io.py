@@ -8,7 +8,12 @@ from pathlib import Path
 
 from swcstudio.core.swc_io import (
     SWC_HEADER_ATTR,
+    decode_swc_bytes,
+    encode_swc_text,
     parse_swc_text_preserve_tokens,
+    rewrite_swc_fields,
+    split_swc_lines,
+    swc_data_rows_from_text,
     write_swc_to_bytes_preserve_tokens,
 )
 
@@ -89,6 +94,65 @@ class SwcReadTests(unittest.TestCase):
         df = parse_swc_text_preserve_tokens("# only a comment\n")
         self.assertEqual(len(df), 0)
         self.assertEqual(df.attrs[SWC_HEADER_ATTR], ["# only a comment"])
+
+    def test_byte_order_mark_before_a_header_keeps_the_header(self) -> None:
+        df = parse_swc_text_preserve_tokens("﻿" + _text(HEADER + DATA))
+        self.assertEqual(df.attrs[SWC_HEADER_ATTR], HEADER)
+        self.assertEqual(df["id"].tolist(), [1, 2, 3, 4])
+
+    def test_byte_order_mark_before_the_first_node_keeps_the_node(self) -> None:
+        df = parse_swc_text_preserve_tokens("﻿" + _text(DATA))
+        self.assertEqual(df["id"].tolist(), [1, 2, 3, 4])
+        self.assertEqual(df["type"].tolist(), [1, 3, 3, 2])
+
+
+class SwcFieldRewriteTests(unittest.TestCase):
+    """``rewrite_swc_fields`` changes the named fields and nothing else."""
+
+    MESSY = (
+        "﻿# header\r\n"
+        "1 1 0 0 0 5.0 -1 extra1 extra2\r\n"
+        "# a note between nodes\r\n"
+        "2\t3.0\t1.5\t0\t0\t1.000\t1   # inline comment\r\n"
+        "abc 3 1 1 1 1 1\r\n"
+        "3  3  2.5  0  0  0.0  2\r\n"
+        "4 3 3.5 0 0 0.75 3"
+    )
+
+    def test_only_the_type_field_changes(self) -> None:
+        out = rewrite_swc_fields(self.MESSY, {2: 4, 3: 2})
+        expected = (self.MESSY.replace("2\t3.0\t1.5", "2\t4\t1.5")
+                    .replace("3  3  2.5", "3  2  2.5"))
+        self.assertEqual(out, expected)
+
+    def test_an_unchanged_value_keeps_its_text(self) -> None:
+        self.assertEqual(rewrite_swc_fields(self.MESSY, {2: 3, 1: 1}), self.MESSY)
+
+    def test_radius_is_rewritten_only_when_asked(self) -> None:
+        out = rewrite_swc_fields(self.MESSY, {}, {3: 1.0})
+        self.assertEqual(out, self.MESSY.replace("3  3  2.5  0  0  0.0  2", "3  3  2.5  0  0  1.0  2"))
+        self.assertEqual(rewrite_swc_fields(self.MESSY, {}, {2: 1.0}), self.MESSY)
+
+    def test_duplicate_or_missing_ids_are_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            rewrite_swc_fields("1 1 0 0 0 1 -1\n1 2 1 0 0 1 1\n", {1: 3})
+        with self.assertRaises(ValueError):
+            rewrite_swc_fields(self.MESSY, {99: 3})
+
+    def test_line_breaks_round_trip(self) -> None:
+        for text in ("a\r\nb\rc\nd", "a\n", "", "\n\n"):
+            self.assertEqual("".join(c + b for c, b in split_swc_lines(text)), text)
+
+    def test_node_rows_skip_comments_and_unparsable_lines(self) -> None:
+        headers, rows = swc_data_rows_from_text(self.MESSY)
+        self.assertEqual([r["id"] for r in rows], [1, 2, 3, 4])
+        self.assertEqual(headers, ["# header", "# a note between nodes"])
+
+    def test_bytes_that_are_not_utf8_survive(self) -> None:
+        data = b"# caf\xe9\n1 1 0 0 0 1 -1\n2 3 1 0 0 1 1\n"
+        text = decode_swc_bytes(data)
+        self.assertEqual(encode_swc_text(rewrite_swc_fields(text, {2: 4})),
+                         data.replace(b"2 3 1", b"2 4 1"))
 
 
 class SwcWriteTests(unittest.TestCase):

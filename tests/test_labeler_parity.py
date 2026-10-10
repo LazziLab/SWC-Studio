@@ -8,6 +8,7 @@ and require the same labels, cell class and quality flag.
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -76,6 +77,91 @@ class LabelerParityTests(unittest.TestCase):
         res = run_file(str(path), BatchOptions(flag_enabled=False), write_output=False, write_log=False)
         self.assertIsNone(res.flag_result)
         self.assertEqual(_labels(res), EXPECTED["cells"]["synthetic_two_class.swc"]["labels"])
+
+
+def _labeler_writes(path: Path, out: Path) -> bytes:
+    """The labeled file the labeler's own command writes for ``path``, without
+    the comment line it adds on top."""
+    from swcstudio.core.auto_typing._pickle_compat import labeler_pickle_aliases
+    from swcstudio.core.labeler.infer_pipeline import (
+        parse_swc_for_labeling,
+        run_pipeline_on_nodes,
+        write_labeled_swc,
+    )
+    from swcstudio.core.model_paths import resolve_model_dir
+
+    folder = resolve_model_dir(auto_download=False)
+    nodes, _notes = parse_swc_for_labeling(path)
+    with labeler_pickle_aliases():
+        result = run_pipeline_on_nodes(nodes, str(path), folder / "cell_type_classifier.pkl",
+                                       folder / "branch_classifier.pkl")
+    write_labeled_swc(path, nodes, result.node_labels, out)
+    return out.read_bytes().split(b"\n", 1)[1]
+
+
+class LabelerWriterParityTests(unittest.TestCase):
+    """SWC-Studio's labeled file is the one the labeler's own writer produces."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory(prefix="swcstudio-parity-")
+        self.tmp = Path(self._tmpdir.name)
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+
+    def test_labeled_copies_equal_the_labelers_output(self) -> None:
+        for name, path in CELLS.items():
+            with self.subTest(cell=name):
+                ours = self.tmp / f"ours_{name}"
+                run_file(str(path), BatchOptions(), output_path=str(ours), write_log=False)
+                self.assertEqual(ours.read_bytes(), _labeler_writes(path, self.tmp / f"theirs_{name}"))
+
+    def test_duplicate_ids_are_refused_by_both(self) -> None:
+        from swcstudio.core.labeler.infer_pipeline import parse_swc_for_labeling, write_labeled_swc
+
+        lines = CELLS["synthetic_two_class.swc"].read_text(encoding="utf-8").splitlines()
+        leaf = lines[-1].split()
+        leaf[0] = "1"  # the soma's id, on an axon or dendrite line
+        path = self.tmp / "dup.swc"
+        path.write_text("\n".join(lines[:-1] + [" ".join(leaf)]) + "\n", encoding="utf-8")
+        # The labeler's checks pass such a file (and its pipeline does not
+        # finish on it), but its writer refuses to match labels to the lines.
+        nodes, _notes = parse_swc_for_labeling(path)
+        with self.assertRaises(ValueError):
+            write_labeled_swc(path, nodes, [3] * len(nodes), self.tmp / "theirs.swc")
+        with self.assertRaises(ValueError) as ctx:
+            run_file(str(path), BatchOptions(), write_output=False, write_log=False)
+        self.assertIn("QC rejected; node id used on more than one line: 1", str(ctx.exception))
+
+    def test_a_branch_folded_into_the_soma_is_the_one_deliberate_difference(self) -> None:
+        # The labeler's writer writes such a branch as soma; SWC-Studio leaves
+        # its nodes as they were and says so. Every other node matches.
+        lines = CELLS["synthetic_three_class.swc"].read_text(encoding="utf-8").splitlines()
+        nodes = [ln.split() for ln in lines if ln and not ln.startswith("#")]
+        parent = {int(p[0]): int(p[6]) for p in nodes}
+        first = next(int(p[0]) for p in nodes if p[6] == "1" and p[1] == "3")
+
+        def under(n: int) -> bool:
+            while n != -1:
+                if n == first:
+                    return True
+                n = parent[n]
+            return False
+
+        branch = {n for n in parent if under(n)}
+        out_lines = [" ".join([p[0], "0", *p[2:]]) if int(p[0]) in branch else " ".join(p) for p in nodes]
+        path = self.tmp / "branch0.swc"
+        path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+        ours = self.tmp / "ours.swc"
+        res = run_file(str(path), BatchOptions(), output_path=str(ours), write_log=False)
+        theirs = _labeler_writes(path, self.tmp / "theirs.swc").decode().splitlines()
+        for mine, other in zip(ours.read_text(encoding="utf-8").splitlines(), theirs):
+            nid = int(mine.split()[0])
+            if nid in branch:
+                self.assertEqual((mine.split()[1], other.split()[1]), ("0", "1"))
+            else:
+                self.assertEqual(mine, other)
+        self.assertEqual(res.unlabeled_nodes, len(branch))
 
 
 if __name__ == "__main__":

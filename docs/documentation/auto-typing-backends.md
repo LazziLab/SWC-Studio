@@ -24,6 +24,11 @@ Each file goes through five stages:
 
 ### Input files
 
+- Before Stage 0, SWC-Studio checks the node lines themselves, because
+  labels are written back to the file by node id: a node id used on more
+  than one line, a node that is its own parent, and parent links that
+  form a loop are refused (`QC rejected`, with the node ids), and the
+  file is not labeled.
 - A file with no soma label takes its root as the soma.
 - A file with no neurite labels is fine. Every node other than the soma
   is treated as an unlabeled neurite, and the labels are predicted from
@@ -36,9 +41,26 @@ Each file goes through five stages:
 - A file whose soma nodes form several disconnected groups holds
   several cells. It is refused before labeling. Split it first with
   `swcstudio split <folder>` (`batch split`).
+- A branch leaving the soma with no standard type anywhere in it (type 0
+  or a custom type throughout) is folded into the soma by the labeler's
+  normalization and gets no label. SWC-Studio does not write such nodes
+  as soma: they keep their type, and the result's warnings say
+  `N nodes on a branch with no standard type were left unlabeled`.
+  Label the branch by hand, or give it a neurite type and label again.
+- A labeled cell missing a compartment of its class gets a warning such
+  as `no axon labeled`. When the input was labeled and had no axon
+  either, the warning adds `(none in the input either)`: the tracing may
+  simply not include it.
 
-In the CLI and GUI, auto-labeling changes node types only. Coordinates,
-radii and parent IDs stay as they are.
+The labeled file (written in place by the CLI and the GUI batch, or as a
+copy by `run_file` / `run_batch`) is the input file with only the type
+field of each relabeled node line rewritten. Coordinates, radii and
+parent IDs stay as written, and so do comment lines where they stand,
+text after a `#` on a node line, columns after the seventh, spacing,
+line endings, a UTF-8 byte order mark and lines that are not node lines.
+In-place edits also add the two `# @PROV` history lines at the top. The
+GUI's single-file **Auto Label Editing** applies the labels to the cell
+open in the editor, which is saved like any other edit.
 
 ### Cell class
 
@@ -108,10 +130,10 @@ pandas. It runs on the CPU and needs no GPU.
 
 A folder you name is the only folder searched. You can name one with:
 
-- `--model-dir` on the CLI, or the `model_dir` argument in Python
-- the **Model folder** picker in the GUI
-- the `model_dir` key of the auto-typing configuration file
+- `--model-dir` on the CLI, the `model_dir` argument in Python, or the
+  **Model folder** picker in the GUI
 - the `SWCSTUDIO_MODEL_DIR` environment variable
+- the `model_dir` key of the auto-typing configuration file
 
 They take precedence in that order. The named folder can hold the model
 files itself, or hold them in a `labeler-1.0.0/` subfolder. If it lacks
@@ -130,9 +152,26 @@ uses the first complete one. In each place it looks in the
    `SWCSTUDIO_BUNDLED_MODEL_DIR`)
 3. the package folder `swcstudio/data/models`
 
-If none of them is complete, SWC-Studio downloads the model set of the
-latest release into the user data folder and searches again. Installed
-copies already carry the model set, so this is a repair path only.
+If none of them is complete, a labeling run downloads the model set of
+the latest release into the user data folder and searches again.
+Installed copies already carry the model set, so this is a repair path
+only. Status checks (`models status`, `doctor`, the GUI's `ready`
+indicator) never download, and searching never creates the user data
+folder; one that cannot be read is skipped.
+
+Each run resolves the folder once and records it with every result and
+history record as `model_record`:
+
+| Key | Meaning |
+|---|---|
+| `model_dir` | the folder, with your home folder written as `~` |
+| `model_source` | `argument`, `env`, `config`, `user` (the user data folder) or `bundled` (the app's or the package's folder) |
+| `model_version` | the labeler version |
+| `model_files` | the SHA-256 of each model file in the folder |
+| `model_sha` | the SHA-256 of the lines `<file name> <sha256>` of `model_files`, sorted by file name: one fingerprint of the model set |
+
+`swcstudio history reproduce` prints the model fingerprint, and passes
+`--model-dir` only for a folder you named.
 
 Model updates from GitHub Releases (Help -> Check for Updates) install
 into the user data folder. An update replaces that folder's contents.
@@ -149,9 +188,10 @@ swcstudio doctor
 
 `models status` prints the labeler version and commit, every folder it
 searched with a marker such as `[COMPLETE]` or `[MISSING]`, the folder
-it uses, and the path of each model file. `doctor` also loads each model
-file to check that it can be read; `doctor --quick` only checks that the
-files exist.
+it uses and its source, and the path of each model file. `doctor` also
+loads each model file to check that it can be read; `doctor --quick`
+only checks that the files exist. A folder without the optional
+`flag_model.joblib` passes `doctor` with a note.
 
 ## Running Auto-Labeling
 
@@ -166,7 +206,10 @@ swcstudio auto-label cell.swc --model-dir /path/to/models
 ```
 
 A folder. Every `.swc` file is labeled in place, each with its own
-history, and the cells are ranked for review:
+history, and the cells are ranked for review. The flag review
+(`<folder>_flag_review_<timestamp>.json` and `.csv`) and a text report
+(`<folder>_batch_auto_typing_<timestamp>.txt`) are written into the
+folder; the CLI and the GUI run the same batch:
 
 ```bash
 swcstudio auto-typing ./swc-folder
@@ -299,17 +342,18 @@ The auto-typing settings live in
 | Key | Meaning |
 |---|---|
 | `enabled` | `true` by default |
-| `model_dir` | a model folder to use; empty means `SWCSTUDIO_MODEL_DIR` if set, otherwise the default search |
+| `model_dir` | a model folder to use when none is given (`--model-dir`, the GUI picker) and `SWCSTUDIO_MODEL_DIR` is not set; empty means the default search |
 | `cell_type` | `auto`, `3-class` or `2-class` |
 | `flag_enabled` | score the quality flag (`true` by default) |
 | `flag_budget` | the share of each cell class a batch flags (`0.1` by default) |
 
 How the values are used:
 
-- In the CLI, the GUI and `swcstudio.api`, `model_dir` applies when no
-  model folder is given with `--model-dir` or the GUI picker. The
-  functions in `swcstudio.core.auto_typing` take `model_dir` as an
-  argument instead.
+- Everywhere, including `run_file` and `run_batch` in
+  `swcstudio.core.auto_typing`, `model_dir` applies when no model
+  folder is given (`--model-dir`, the GUI picker, the `model_dir`
+  argument) and `SWCSTUDIO_MODEL_DIR` is not set. Results record it as
+  `model_source: config`.
 - The GUI panels take their starting cell class and flag budget from
   the file. **Show JSON** opens the file for editing.
 - The **Likely wrong labels** check uses the file's cell class.
@@ -348,7 +392,12 @@ By default it writes a labeled copy and a text report into
 files either. It writes labeled copies into the folder
 `<folder>_batch_auto_typing_<timestamp>/` inside the input folder,
 together with a text report and, when the flag is on,
-`flag_review.json` / `flag_review.csv`.
+`flag_review.json` / `flag_review.csv`. A labeled copy is its input with
+only the relabeled type fields rewritten (`labeled_text`). `FileResult`
+and `BatchResult` carry `model_record`; `FileResult` also carries
+`warnings` and `unlabeled_nodes`. To label many files with one model
+folder, resolve it once with `resolve_models(model_dir)` and pass it as
+`models=`.
 
 To label files in place with history, as the CLI and GUI do, use
 `swcstudio.api.batch_auto_typing`. See
@@ -397,6 +446,10 @@ Options:
 - `--skip stage1,stage2,correction,flag` leaves stages out. For
   example, `--skip flag` makes a model set without a quality flag.
 
+Hidden `*.swc` files in the class folders (such as the `._name.swc`
+files macOS writes next to copied files) and folders named `*.swc` are
+refused before training starts; the error lists them.
+
 The output folder holds the four model files, `eval_split.json` (the
 split used) and `train_manifest.json` (counts and timings). Label with
 it through `--model-dir`, `SWCSTUDIO_MODEL_DIR` or the GUI's Model
@@ -429,9 +482,28 @@ or in `labeler-1.0.0/`.
 cell.swc: QC rejected; not one connected cell (2 roots, 0 orphan nodes)
 ```
 
-The file failed Stage 0 and was not labeled. The reasons say which
-check failed. Fix the file with the validation and geometry tools, then
-label it again.
+```text
+cell.swc: QC rejected; node id used on more than one line: 1206
+cell.swc: QC rejected; node 88 is its own parent
+cell.swc: QC rejected; parent links form a loop through nodes 9001, 9002
+```
+
+The file failed the structural checks and was not labeled or changed.
+The reasons say which check failed and name the nodes where they can.
+Fix the file (give every node its own id, reconnect a node that is its
+own parent, break a loop) with the validation and geometry tools or a
+text editor, then label it again.
+
+### Nodes were left unlabeled
+
+```text
+cell.swc: ... WARNING: 977 nodes on a branch with no standard type were left unlabeled
+```
+
+A branch leaving the soma had no standard type anywhere in it, so the
+labeler folded it into the soma and gave it no label. Those nodes keep
+their type. Give the branch a neurite type (or label it by hand) and
+label the cell again.
 
 ### A file holds several cells
 
@@ -474,12 +546,20 @@ SWC-Studio:
    committed labeler: its code into `swcstudio/core/labeler/` and its
    models into `swcstudio/data/models/labeler-<version>/`. It also
    writes `LABELER.json`. It refuses uncommitted changes unless you pass
-   `--allow-dirty`. Do not edit `swcstudio/core/labeler/` by hand.
+   `--allow-dirty`, copies only files git tracks, checks the new copy
+   (modules import, model checksums match) before replacing the old one,
+   and removes model folders of other labeler versions. Do not edit
+   `swcstudio/core/labeler/` by hand.
 2. `python scripts/make_labeler_golden.py --source <labeler checkout>`,
    run in the labeler's own environment, rewrites
-   `tests/fixtures/labeler/`: three synthetic cells and `expected.json`.
+   `tests/fixtures/labeler/`: three synthetic cells and `expected.json`,
+   whose labels are read from the file the labeler's own writer
+   produces.
 3. `tests/test_labeler_parity.py` requires SWC-Studio's labels, cell
-   class and quality flag to equal the labeler's.
+   class and quality flag to equal the labeler's, and its labeled copies
+   to equal the labeler writer's output byte for byte. The one
+   deliberate difference: SWC-Studio does not write a branch the
+   labeler folds into the soma as soma.
 
 ## Reference
 
@@ -489,6 +569,7 @@ SWC-Studio:
 | `run_file`, `run_batch`, `run_folder` | `swcstudio.core.auto_typing` |
 | `apply_flag_budget`, `write_flag_review` | `swcstudio.core.auto_typing` |
 | `normalize_cell_class`, `cell_class_name` | `swcstudio.core.auto_typing` |
-| `is_available`, `backend_status` | `swcstudio.core.auto_typing` |
+| `is_available`, `backend_status`, `resolve_models`, `labeled_text` | `swcstudio.core.auto_typing` |
 | `train_user_models` | `swcstudio.core.auto_typing_train` |
-| `resolve_model_dir`, `labeler_info` | `swcstudio.core.model_paths` |
+| `resolve_model_dir`, `select_model_dir`, `model_record`, `recorded_model_dir`, `labeler_info` | `swcstudio.core.model_paths` |
+| `rewrite_swc_fields` | `swcstudio.core.swc_io` |

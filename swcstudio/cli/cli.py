@@ -243,22 +243,6 @@ def _print_validation_precheck(report: dict) -> None:
         print("")
 
 
-def _recorded_model_dir(model_dir: str | None) -> str | None:
-    """The model folder as stored in the file's history, home written as ``~``.
-
-    The history travels with the SWC, so a path under the home folder
-    would carry the username. Model lookup expands ``~`` again, so the
-    command ``history reproduce`` prints still finds the folder.
-    """
-    if not model_dir:
-        return model_dir
-    path = Path(model_dir).expanduser().absolute()
-    try:
-        return "~/" + path.relative_to(Path.home()).as_posix()
-    except ValueError:
-        return str(model_dir)
-
-
 def _status_tag(status: str) -> str:
     s = str(status or "").lower()
     if s == "pass":
@@ -321,8 +305,9 @@ def _print_auto_typing_guide() -> None:
         "Stage 4  quality flag: each cell's predicted per-cell F1; a batch flags\n"
         "         the riskiest share of each cell class for review\n"
         "\n"
-        "Models are resolved via --model-dir, SWCSTUDIO_MODEL_DIR, the user data\n"
-        "directory, or the bundled package directory.\n"
+        "Models are resolved via --model-dir, SWCSTUDIO_MODEL_DIR, model_dir in the\n"
+        "auto-typing configuration, the user data directory, or the bundled package\n"
+        "directory, in that order.\n"
         "Run `swcstudio models status` for a full diagnostic.\n",
         file=sys.stderr,
     )
@@ -1037,8 +1022,6 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.tool == "batch" and args.feature == "auto-typing":
             _print_auto_typing_guide()
-            from swcstudio.core.provenance import OpKind, current_swc_path_for, tracked_op
-
             opts = BatchOptions(
                 soma=True,
                 axon=True,
@@ -1054,7 +1037,9 @@ def main(argv: list[str] | None = None) -> int:
             if getattr(args, "model_dir", None):
                 cfg_overrides["model_dir"] = str(args.model_dir)
             from swcstudio.core.auto_typing import is_available  # noqa: PLC0415
-            ok, reason = is_available(model_dir=cfg_overrides.get("model_dir"))
+            # The run's own check: --model-dir, else SWCSTUDIO_MODEL_DIR, else
+            # model_dir in the auto-typing configuration, else the default search.
+            ok, reason = is_available(model_dir=cfg_overrides.get("model_dir") or None, auto_download=True)
             if not ok:
                 print(f"ERROR: auto-typing engine unavailable.\n{reason}", file=sys.stderr)
                 return 2
@@ -1062,142 +1047,44 @@ def main(argv: list[str] | None = None) -> int:
             folder = Path(args.folder)
             if not folder.is_dir():
                 raise NotADirectoryError(str(folder))
-            swc_files = sorted(
-                [p for p in folder.iterdir() if is_swc_data_file(p)],
-                key=lambda p: p.name.lower(),
+            # The same batch the GUI runs: each file labeled in place with its
+            # own history, one flag review and one text report in the folder.
+            from swcstudio.tools.batch_processing.features.auto_typing import (  # noqa: PLC0415
+                run_folder as run_batch_auto_typing,
             )
-            if not swc_files:
-                raise FileNotFoundError(f"No .swc files found in: {folder}")
-
-            processed = 0
-            total_nodes = 0
-            total_type_changes = 0
-            total_radius_changes = 0
-            files_flagged = 0
-            files_qc_failed = 0
-            failures: list[str] = []
-            per_file: list[str] = []
-            commits: list[dict] = []
-            records: list[dict] = []
-            from swcstudio.core.auto_typing import (  # noqa: PLC0415
-                apply_flag_budget,
-                cell_class_name,
-                write_flag_review,
+            # As the GUI does, so the recorded configuration is the one used.
+            cfg_overrides.update(cell_type=opts.cell_type, flag_enabled=bool(opts.flag_enabled),
+                                 flag_budget=float(opts.flag_budget))
+            res = run_batch_auto_typing(
+                str(folder),
+                options=opts,
+                config_overrides=cfg_overrides,
+                message="batch auto-label",
             )
-            from swcstudio.core.auto_typing.runner import _warning_text, flag_record  # noqa: PLC0415
-            from swcstudio.core.reporting import operation_report_path_for_folder, timestamp_slug  # noqa: PLC0415
-            run_timestamp = timestamp_slug()
-
-            for swc_path in swc_files:
-                try:
-                    # Run first, commit second. This prevents QC-rejected files
-                    # from creating empty history archives.
-                    out = validation_auto_label_file(
-                        str(swc_path),
-                        options=opts,
-                        config_overrides=cfg_overrides,
-                        output_path=None,
-                        write_output=False,
-                        write_log=False,
-                    )
-                except Exception as e:  # noqa: BLE001
-                    msg = f"{swc_path.name}: {e}"
-                    failures.append(msg)
-                    qc = None
-                    if "QC rejected" in str(e):
-                        files_qc_failed += 1
-                        qc = str(e).split("QC rejected; ", 1)[-1].split("; ")
-                    records.append(flag_record(swc_path, None, None, 0, 0, qc_reasons=qc,
-                                               error=None if qc else str(e)))
-                    per_file.append(msg)
-                    continue
-
-                out_counts = dict(out.get("out_type_counts", {}) or {})
-                flag_result = dict(out.get("flag_result", {}) or {})
-                params = {
-                    "cell_type": opts.cell_type,
-                    "flag_enabled": bool(opts.flag_enabled),
-                    "flag_budget": float(opts.flag_budget),
-                    "labeler_version": out.get("labeler_version"),
-                    "model_dir": _recorded_model_dir(cfg_overrides.get("model_dir")),
-                    "nodes_total": int(out.get("nodes_total", 0)),
-                    "type_changes": int(out.get("type_changes", 0)),
-                    "cell_type_result": out.get("cell_type"),
-                    "cell_type_source": out.get("cell_type_source"),
-                    "stage1_cell_type": out.get("stage1_cell_type"),
-                    "stage1_confidence": out.get("stage1_confidence"),
-                    "class_mismatch": bool(out.get("class_mismatch", False)),
-                    "predicted_f1": flag_result.get("predicted_f1"),
-                }
-                with tracked_op(
-                    swc_path,
-                    kind=OpKind.AUTO_LABEL,
-                    params=params,
-                    message=(
-                        "batch auto-label "
-                        f"type_changes={int(out.get('type_changes', 0))} "
-                        f"cell_class={cell_class_name(out.get('cell_type'))}"
-                    ),
-                    is_ai=True,
-                ) as op:
-                    op.set_output(bytes(out.get("bytes") or b""))
-
-                processed += 1
-                total_nodes += int(out.get("nodes_total", 0))
-                total_type_changes += int(out.get("type_changes", 0))
-                total_radius_changes += int(out.get("radius_changes", 0))
-                records.append(flag_record(swc_path, swc_path, out.get("result_obj"),
-                                           int(out.get("nodes_total", 0)), int(out.get("type_changes", 0)),
-                                           out_type_counts=out_counts))
-                commits.append(
-                    {
-                        "file": swc_path.name,
-                        "output_path": str(current_swc_path_for(swc_path)),
-                        "commit_sha": op.result.commit_sha,
-                        "branch": op.result.branch,
-                    }
-                )
-                f1 = flag_result.get("predicted_f1")
-                per_file.append(
-                    f"{swc_path.name}: nodes={int(out.get('nodes_total', 0))}, "
-                    f"type_changes={int(out.get('type_changes', 0))}, "
-                    f"cell_class={cell_class_name(out.get('cell_type'))} "
-                    f"({'user' if out.get('cell_type_source') == 'user' else 'auto'}), "
-                    + (f"predicted_f1={float(f1):.3f}, " if f1 is not None else "")
-                    + f"out_types(soma/axon/basal/apic)="
-                    f"{out_counts.get(1, 0)}/{out_counts.get(2, 0)}/"
-                    f"{out_counts.get(3, 0)}/{out_counts.get(4, 0)}"
-                    + _warning_text(records[-1])
-                )
-
-            flag_review_path = None
-            if bool(opts.flag_enabled) and records:
-                apply_flag_budget(records, float(opts.flag_budget))
-                files_flagged = sum(1 for r in records if r.get("flagged"))
-                flag_review_path = str(write_flag_review(
-                    operation_report_path_for_folder(folder, "flag_review", extension=".json",
-                                                     timestamp=run_timestamp),
-                    records, budget=float(opts.flag_budget), folder=str(folder), timestamp=run_timestamp))
-
             _print_json(
                 {
-                    "folder": str(folder),
-                    "files_total": len(swc_files),
-                    "files_processed": processed,
-                    "files_failed": len(failures),
-                    "files_qc_failed": files_qc_failed,
-                    "total_nodes": total_nodes,
-                    "total_type_changes": total_type_changes,
-                    "total_radius_changes": total_radius_changes,
-                    "files_flagged": files_flagged,
-                    "flag_budget": float(opts.flag_budget) if opts.flag_enabled else None,
-                    "flag_review_path": flag_review_path,
-                    "flagged_files": [r["file"] for r in records if r.get("flagged")],
-                    "per_file": per_file,
-                    "failures": failures,
-                    "commits": commits,
-                    "log_path": None,
+                    "folder": res.folder,
+                    "files_total": res.files_total,
+                    "files_processed": res.files_processed,
+                    "files_failed": res.files_failed,
+                    "files_qc_failed": res.files_qc_failed,
+                    "files_with_warnings": res.files_with_warnings,
+                    "total_nodes": res.total_nodes,
+                    "total_type_changes": res.total_type_changes,
+                    "total_radius_changes": res.total_radius_changes,
+                    "files_flagged": res.files_flagged,
+                    "flag_budget": res.flag_budget,
+                    "flag_review_path": res.flag_review_path,
+                    "flagged_files": [r["file"] for r in (res.flag_records or []) if r.get("flagged")],
+                    "per_file": res.per_file,
+                    "failures": res.failures,
+                    "commits": [
+                        {**commit, "output_path": str(Path(res.folder) / str(commit.get("file")))}
+                        for commit in (res.commits or [])
+                    ],
+                    "log_path": res.log_path,
                     "out_dir": None,
+                    "model_record": res.model_record,
                 }
             )
             return 0
@@ -1516,14 +1403,19 @@ def main(argv: list[str] | None = None) -> int:
             cfg_overrides = _parse_config_overrides(args.config_json) or {}
             if getattr(args, "model_dir", None):
                 cfg_overrides["model_dir"] = str(args.model_dir)
-            from swcstudio.core.auto_typing import is_available  # noqa: PLC0415
-            ok, reason = is_available(model_dir=cfg_overrides.get("model_dir"))
+            from swcstudio.core.auto_typing import is_available, resolve_models  # noqa: PLC0415
+            from swcstudio.core.model_paths import model_record  # noqa: PLC0415
+            model_argument = cfg_overrides.get("model_dir") or None
+            # The run's own check: --model-dir, else SWCSTUDIO_MODEL_DIR, else
+            # model_dir in the auto-typing configuration, else the default search.
+            ok, reason = is_available(model_dir=model_argument, auto_download=True)
             if not ok:
                 print(f"ERROR: auto-typing engine unavailable.\n{reason}", file=sys.stderr)
                 return 2
             src = Path(args.file)
             if not src.exists():
                 raise FileNotFoundError(str(src))
+            models = resolve_models(model_argument)
             out = validation_auto_label_file(
                 str(src),
                 options=opts,
@@ -1531,14 +1423,18 @@ def main(argv: list[str] | None = None) -> int:
                 output_path=None,
                 write_output=False,
                 write_log=False,
+                models=models,
             )
             out_counts = dict(out.get("out_type_counts", {}) or {})
             flag_result = dict(out.get("flag_result", {}) or {})
+            # model_dir (home as ~), model_source, model_version, model_sha, model_files
+            record = dict(out.get("model_record") or model_record(models.folder, models.source))
+            out["model_record"] = record
             params = {
                 "cell_type": opts.cell_type,
                 "flag_enabled": bool(opts.flag_enabled),
                 "labeler_version": out.get("labeler_version"),
-                "model_dir": _recorded_model_dir(cfg_overrides.get("model_dir")),
+                **record,
                 "nodes_total": int(out.get("nodes_total", 0)),
                 "type_changes": int(out.get("type_changes", 0)),
                 "cell_type_result": out.get("cell_type"),
@@ -1549,6 +1445,7 @@ def main(argv: list[str] | None = None) -> int:
                 "flagged": bool(flag_result.get("flagged", False)),
                 "predicted_f1": flag_result.get("predicted_f1"),
                 "out_type_counts": out_counts,
+                "unlabeled_nodes": int(out.get("unlabeled_nodes", 0) or 0),
             }
             with tracked_op(
                 src,

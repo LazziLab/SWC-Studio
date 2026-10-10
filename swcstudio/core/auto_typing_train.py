@@ -48,8 +48,29 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from swcstudio.core.model_paths import MODEL_FILES
+from swcstudio.core.swc_io import is_swc_data_file
 
 STAGES = ("stage1", "stage2", "correction", "flag")
+CELL_CLASS_DIRS = ("pyramidal", "interneuron")
+
+
+def _entries_that_are_not_cells(data_dir: Path) -> list[str]:
+    """Entries the trainer's ``<class>/*.swc`` glob matches that are not cell files.
+
+    The labeler's trainer lists each class folder with ``Path.glob("*.swc")``,
+    which also matches hidden files (macOS ``._name.swc`` AppleDouble files hold
+    Finder metadata, not SWC rows) and folders. Training on them would fail or,
+    worse, enter them in the recorded split; they are refused instead.
+    """
+    out: list[str] = []
+    for sub in CELL_CLASS_DIRS:
+        folder = data_dir / sub
+        if not folder.is_dir():
+            continue
+        for path in sorted(folder.glob("*.swc")):
+            if not is_swc_data_file(path):
+                out.append(f"{sub}/{path.name}")
+    return out
 
 
 @dataclass
@@ -73,6 +94,9 @@ def train_user_models(
 ) -> TrainingResult:
     """Train the labeler on ``data_dir`` and write the model folder ``output_dir``.
 
+    A class folder holding a hidden ``*.swc`` file or a folder named ``*.swc``
+    is refused with a ``ValueError`` that lists them.
+
     ``seed`` fixes the held-out split (random when omitted; recorded either way).
     ``device`` is where Stages 1 and 2 are fitted: ``cpu``, or ``cuda`` with an
     NVIDIA GPU and a CUDA build of XGBoost. ``skip`` names stages to leave out,
@@ -80,11 +104,20 @@ def train_user_models(
     """
     data_dir = Path(data_dir)
     output_dir = Path(output_dir)
-    for sub in ("pyramidal", "interneuron"):
+    for sub in CELL_CLASS_DIRS:
         if not (data_dir / sub).is_dir():
             raise FileNotFoundError(
                 f"Expected {data_dir / sub} to exist. The dataset needs a 'pyramidal' "
                 "(3-class) and an 'interneuron' (2-class) subfolder of SWC files.")
+    not_cells = _entries_that_are_not_cells(data_dir)
+    if not_cells:
+        shown = "\n  ".join(not_cells[:20])
+        more = f"\n  ... and {len(not_cells) - 20} more" if len(not_cells) > 20 else ""
+        raise ValueError(
+            "The training folders hold entries the trainer would read as cells but that are not "
+            "SWC files of cells: hidden files (such as the '._name.swc' files macOS writes next "
+            f"to copied files) or folders named '*.swc':\n  {shown}{more}\n"
+            "Remove them (or move them out of the dataset) and run the training again.")
     skip = [s.strip() for s in skip if s and s.strip()]
     unknown = sorted(set(skip) - set(STAGES))
     if unknown:

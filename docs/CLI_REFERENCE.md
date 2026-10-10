@@ -63,7 +63,11 @@ Public direct commands:
 configuration files, deserializes each auto-labeler model file, and
 verifies that the GUI module imports. Use `swcstudio doctor --json` in
 automated setup checks or `swcstudio doctor --quick` to skip model
-deserialization (it then only checks that the model files exist).
+deserialization (it then only checks that the model files exist). It
+checks the model folder auto-labeling would use, found the same way (see
+[Auto-Label Model Folder](#auto-label-model-folder)), and never downloads
+models. A folder without the optional `flag_model.joblib` passes, with a
+`[NOTE]` that no quality flag is scored.
 
 The direct command form is the intended public interface. Internal grouped routes such as `validation`, `morphology`, or `geometry` still exist, but the direct form is the one to document and use.
 
@@ -157,17 +161,26 @@ swcstudio split ./swc-folder
 
 - Purpose: auto-label every SWC file in one folder with the SWC
   auto-labeler, then rank the cells for review.
-- Same as `swcstudio batch auto-typing`.
+- Same as `swcstudio batch auto-typing`, and the same batch the GUI's
+  Batch Processing tab runs.
 - Each labeled source SWC is updated in place and gets its own history.
-- Files that are not labeled are skipped and listed under `failures`
-  in the JSON summary. This covers files that fail the structural
-  checks (`QC rejected`), files with several disconnected soma groups,
-  and files that raise another error. They are never flagged.
+  The file changes as `auto-label` describes: only type fields are
+  rewritten.
+- Files that are not labeled are not changed and are listed under
+  `failures` in the JSON summary, as `<file>: <reason>`. This covers
+  files that fail the structural checks (`QC rejected`), files with
+  several disconnected soma groups, and files that raise another error.
+  They are never flagged.
 - Prints a short stage guide to stderr before processing, so stdout
   stays JSON.
-- Writes the flag review `<folder>_flag_review_<timestamp>.json` and a
-  `.csv` copy into the folder. Open it in the GUI's Flag Review window.
-  See [Reviewing Flagged Cells](documentation/auto-typing-backends.md#reviewing-flagged-cells).
+- Writes, into the folder, the flag review
+  `<folder>_flag_review_<timestamp>.json` with a `.csv` copy, and a text
+  report `<folder>_batch_auto_typing_<timestamp>.txt` (`log_path`) with
+  one line per labeled file and every file not labeled. Open the review
+  in the GUI's Flag Review window. See
+  [Reviewing Flagged Cells](documentation/auto-typing-backends.md#reviewing-flagged-cells).
+- Each per-file line's `flag=` part is the file's final flag, after the
+  batch's flag budget is applied, and agrees with the flag review.
 
 Options:
 
@@ -184,13 +197,16 @@ Options:
 - `--no-flag`: do not score the quality flag. No flag review is
   written.
 - `--model-dir DIR`: use the model folder at this path. It is the only
-  folder searched.
+  folder searched. Without it, `SWCSTUDIO_MODEL_DIR`, then `model_dir`
+  in the auto-typing configuration, then the default search decide.
 
 The JSON summary includes `files_total`, `files_processed`,
-`files_failed`, `files_qc_failed`, `total_nodes`, `total_type_changes`,
-`files_flagged`, `flag_budget`, `flag_review_path`, `flagged_files`,
-`per_file`, `failures` and `commits` (one history commit per labeled
-file).
+`files_failed` (every file not labeled), `files_qc_failed` (those that
+failed the structural checks), `files_with_warnings`, `total_nodes`,
+`total_type_changes`, `files_flagged`, `flag_budget`,
+`flag_review_path`, `flagged_files`, `per_file`, `failures`, `commits`
+(one history commit per labeled file), `log_path` (the text report) and
+`model_record` (the model folder used; see `auto-label`).
 
 Examples:
 
@@ -264,13 +280,24 @@ swcstudio auto-fix cell.swc
 - Purpose: auto-label one SWC file with the SWC auto-labeler, as the
   GUI's Auto Label Editing panel does.
 - Same as `swcstudio validation auto-label`.
-- Changes only node types; geometry, parent IDs, and radii are preserved.
 - Writes the labels back into the file and records the operation in its
-  history.
-- A file that fails the structural checks is not changed. The command
-  exits with an error that says `QC rejected` and lists the reasons. A
+  history. Only the type field of each node line whose label changed is
+  rewritten. Every other byte is kept: coordinates, radii and parent IDs
+  as written, comment lines where they stand, text after a `#` on a node
+  line, columns after the seventh, spacing, line endings, a UTF-8 byte
+  order mark, and lines that are not node lines. As with every edit
+  command, two `# @PROV` lines are added (or updated) at the top.
+- A file that fails the structural checks is not changed and gets no
+  history. The command exits with an error that says `QC rejected` and
+  lists the reasons, naming the nodes where it can: a node id used on
+  more than one line, a node that is its own parent, parent links that
+  form a loop, and the labeler's own checks (see
+  [Input files](documentation/auto-typing-backends.md#input-files)). A
   file whose soma nodes form several disconnected groups is refused;
   split it first with `swcstudio split`.
+- A branch leaving the soma that has no standard type anywhere (type 0
+  or a custom type throughout) is not labeled. Its nodes keep their
+  type, and `warnings` says how many were left unlabeled.
 - The quality flag uses its fixed cut-off for a single file.
 
 Options:
@@ -280,7 +307,8 @@ Options:
   accepted as values.
 - `--no-flag`: do not score the quality flag.
 - `--model-dir DIR`: use the model folder at this path. It is the only
-  folder searched.
+  folder searched. Without it, `SWCSTUDIO_MODEL_DIR`, then `model_dir`
+  in the auto-typing configuration, then the default search decide.
 
 The command prints JSON. The main fields are:
 
@@ -296,7 +324,10 @@ The command prints JSON. The main fields are:
 | `qc_result` | the structural checks: `passed`, `reasons`, `n_nodes` |
 | `flag_result` | the quality flag (see below); empty with `--no-flag` |
 | `notes` | what the labeler assumed about unlabeled input |
+| `warnings` | a compartment the cell's class should have but got no node of (`no axon labeled`; with `(none in the input either)` when the labeled input had none), and nodes left unlabeled |
+| `unlabeled_nodes` | nodes the labeler did not label; they keep their type |
 | `labeler_version` | the labeler version, for example `1.0.0` |
+| `model_record` | the model folder used: `model_dir` (home written as `~`), `model_source` (`argument`, `env`, `config`, `user` or `bundled`), `model_version`, `model_files` (SHA-256 of each model file) and `model_sha` (SHA-256 of the sorted lines `<file name> <sha256>`). The same keys are stored in the history record |
 | `commit_sha`, `branch`, `input_sha`, `output_sha`, `diff_ref`, `ai_run_ref` | the history commit |
 
 `flag_result` holds:
@@ -479,6 +510,11 @@ Required dataset layout:
 Each SWC's type column (1=soma, 2=axon, 3=basal or dendrite, 4=apical)
 is the per-node ground truth.
 
+Hidden `*.swc` files in `pyramidal/` or `interneuron/` (such as the
+`._name.swc` files macOS writes next to files it copies) and folders
+named `*.swc` are refused before training starts: the command lists
+them so you can remove them.
+
 The trainer holds out a fixed share of the files, chosen from the file
 name and the seed (20% by default). The labeler is not fitted on these
 files. The quality flag is fitted on them.
@@ -532,9 +568,10 @@ swcstudio models status --model-dir ~/my-models
 The output starts with the folders searched, in order. Each has a
 marker: `[COMPLETE]`, `[INCOMPLETE: missing ...]`, `[no model files]`
 or `[MISSING]`. A JSON summary follows with `labeler_version`,
-`labeler_commit`, `model_dir` (the folder used), `models_ok`, and the
-path and status of each model file (`stage1`, `stage2`, `correction`,
-`flag`).
+`labeler_commit`, `model_dir` (the folder used), `model_source` (where
+it came from: `argument`, `env`, `config`, `user` or `bundled`),
+`models_ok`, and the path and status of each model file (`stage1`,
+`stage2`, `correction`, `flag`). The command never downloads models.
 
 ### Auto-Label Model Folder
 
@@ -547,12 +584,15 @@ Auto-labeling uses one model folder, `labeler-1.0.0/`, with four files:
 | `branch_correction.joblib` | Stage 3, branch correction for 3-class cells | yes |
 | `flag_model.joblib` | Stage 4, one quality flag per cell class | no; without it, no flag is scored |
 
-A folder named with `--model-dir` (or `SWCSTUDIO_MODEL_DIR`) is the
-only folder searched. It can hold the files itself or in a
+A named folder is the only folder searched. The first of these names
+it: `--model-dir` (or the GUI's model folder picker), the
+`SWCSTUDIO_MODEL_DIR` environment variable, `model_dir` in the
+auto-typing configuration file. It can hold the files itself or in a
 `labeler-1.0.0/` subfolder. If it lacks a required file, auto-labeling
 stops and reports what is missing. Without a named folder, the engine
 searches the user data folder, the desktop app's model folder and the
-package folder `swcstudio/data/models`, in that order. See
+package folder `swcstudio/data/models`, in that order. Each run
+resolves the folder once and records it in `model_record`. See
 [Model Resolution](documentation/auto-typing-backends.md#model-resolution).
 
 ## Plugins

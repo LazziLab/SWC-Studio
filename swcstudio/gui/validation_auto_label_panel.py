@@ -301,7 +301,8 @@ class ValidationAutoLabelPanel(QWidget):
 
     def _refresh_backend_status(self) -> None:
         md = (self._edit_model_dir.text() or "").strip() or None
-        ok, reason = is_available(model_dir=md)
+        # A status probe, run while the panel is built: never download here.
+        ok, reason = is_available(model_dir=md, auto_download=False)
         if ok:
             self._backend_status_lbl.setText("ready")
             self._backend_status_lbl.setStyleSheet("font-size: 11px; color: #2a7;")

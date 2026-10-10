@@ -51,6 +51,8 @@ class BatchResult:
     flag_records: list[dict[str, Any]] | None = None
     flag_review_path: str | None = None
     flag_budget: float | None = None
+    # The model folder the batch used (see ``model_paths.model_record``).
+    model_record: dict[str, Any] | None = None
 
 
 @dataclass
@@ -80,6 +82,17 @@ class FileResult:
     # What the labeler assumed about an unlabeled input file.
     notes: list[str] = field(default_factory=list)
     labeler_version: str | None = None
+    # The model folder this run used: ``model_dir`` (home written as ``~``),
+    # ``model_source``, ``model_version``, ``model_sha``, ``model_files``
+    # (see ``model_paths.model_record``). Merge it into a history record's params.
+    model_record: dict[str, Any] | None = None
+    # What a reviewer should know: compartments missing from the result, and
+    # nodes the labeler left unlabeled.
+    warnings: list[str] = field(default_factory=list)
+    # Nodes the labeler did not label (they keep their input type).
+    unlabeled_nodes: int = 0
+    # Node count per standard type (1-4) in the input file.
+    input_type_counts: dict[int, int] | None = None
 
 
 __all__ = ["BatchOptions", "BatchResult", "FileResult"]

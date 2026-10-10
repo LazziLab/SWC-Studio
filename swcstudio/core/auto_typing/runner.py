@@ -5,7 +5,9 @@ of the released labeler's code and ``labeler-<version>`` its model set, made by
 ``scripts/sync_labeler.py``. For each file:
 
 * Stage 0 checks that the file is one connected cell with a soma and finite
-  geometry. A file that fails is not labeled.
+  geometry. Before that, SWC-Studio checks the file's own node lines: every
+  node id used once, and no node that is its own ancestor (a parent link to
+  itself or a loop of parent links). A file that fails is not labeled.
 * Stage 1 decides the cell class: 3-class (axon, basal, apical) or 2-class
   (axon, dendrite). The user may choose the class instead; Stage 1 then still
   runs, and a cell whose chosen class differs from Stage 1's prediction is
@@ -17,10 +19,15 @@ of the released labeler's code and ``labeler-<version>`` its model set, made by
   the riskiest share of each cell class (``BatchOptions.flag_budget``, 10% by
   default); a class with too few cells for that share uses the fixed cut-off.
 
+Labeled output (a copy, or the file itself for the in-place paths of the CLI
+and GUI) is the input text with only the type field of each relabeled node line
+rewritten (``labeled_text``); every other byte is kept.
+
 Public surface:
 
 * ``run_file(path, opts, ...)`` returns ``FileResult``
 * ``run_batch(folder, opts, ...)`` returns ``BatchResult``
+* ``resolve_models(model_dir)`` returns the model folder and its source
 * ``is_available()`` returns ``(bool, reason)``
 * ``backend_status()`` returns a diagnostic dict
 """
@@ -29,22 +36,37 @@ from __future__ import annotations
 import csv
 import json
 import math
+import os
+import tempfile
 import zipfile
+from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
-from swcstudio.core.swc_io import is_swc_data_file
+from swcstudio.core.swc_io import (
+    BOM,
+    decode_swc_bytes,
+    encode_swc_text,
+    is_swc_data_file,
+    rewrite_swc_fields,
+    split_swc_lines,
+    strip_line_bom,
+    swc_data_rows_from_text,
+)
 from swcstudio.core.model_paths import (
     MODEL_FILES,
+    ModelSelection,
     available_models,
     diagnostic_search_report,
     labeler_info,
-    resolve_model_dir,
+    model_record,
+    select_model_dir,
 )
 from swcstudio.core.reporting import (
     auto_typing_log_path_for_file,
-    format_auto_typing_report_text,
     operation_output_dir_for_folder,
     operation_output_path_for_file,
     operation_report_path_for_file,
@@ -66,40 +88,72 @@ FLAG_REVIEW_CSV = "flag_review.csv"
 # ---------------------------------------------------------------------------
 
 
-def is_available(*, model_dir: str | None = None) -> tuple[bool, str]:
-    """Return ``(ok, reason)`` describing whether auto-labeling can run now.
+def _missing_models_message(model_dir: str | os.PathLike | None) -> str:
+    return "Auto-labeling cannot find its model files.\n" + diagnostic_search_report(override=model_dir)
 
-    It needs a complete model folder (see :mod:`swcstudio.core.model_paths`) and
-    the packages the labeler imports: joblib, scikit-learn, XGBoost and pandas.
-    """
-    if resolve_model_dir(model_dir) is None:
-        return False, ("Auto-labeling cannot find its model files.\n"
-                       + diagnostic_search_report(override=model_dir))
+
+def _package_problem() -> str | None:
     try:
         import joblib  # noqa: F401
         import pandas  # noqa: F401
         import sklearn  # noqa: F401
         import xgboost  # noqa: F401
     except Exception as exc:  # noqa: BLE001
-        return False, (
+        return (
             "Auto-labeling could not import one of its required packages "
             f"(import failed: {exc.__class__.__name__}: {exc}). "
             "Repair the active environment with "
             "`python -m pip install --upgrade --force-reinstall swcstudio`, "
             "then run `swcstudio doctor`."
         )
+    return None
+
+
+def is_available(*, model_dir: str | os.PathLike | None = None,
+                 auto_download: bool = False) -> tuple[bool, str]:
+    """Return ``(ok, reason)`` describing whether auto-labeling can run now.
+
+    It needs a complete model folder (see :mod:`swcstudio.core.model_paths`:
+    ``model_dir``, else ``SWCSTUDIO_MODEL_DIR``, else ``model_dir`` in the
+    auto-typing configuration, else the default search) and the packages the
+    labeler imports: joblib, scikit-learn, XGBoost and pandas.
+
+    This is a probe: it never downloads models unless ``auto_download`` is set.
+    """
+    if select_model_dir(model_dir, auto_download=auto_download) is None:
+        return False, _missing_models_message(model_dir)
+    problem = _package_problem()
+    if problem is not None:
+        return False, problem
     return True, "available"
+
+
+def resolve_models(model_dir: str | os.PathLike | None = None, *,
+                   auto_download: bool = True) -> ModelSelection:
+    """The model folder a run uses and where it came from; resolve it once per run.
+
+    ``model_dir`` is the explicit argument; without it ``SWCSTUDIO_MODEL_DIR``,
+    then ``model_dir`` in the auto-typing configuration, then the default
+    search decide. Raises ``FileNotFoundError`` with the search report when no
+    complete folder is found.
+    """
+    selection = select_model_dir(model_dir, auto_download=auto_download)
+    if selection is None:
+        raise FileNotFoundError(_missing_models_message(model_dir))
+    return selection
 
 
 def backend_status(*, model_dir: str | None = None) -> dict[str, Any]:
     """Structured status report, for ``swcstudio models status`` and the GUI."""
     info = labeler_info()
-    folder = resolve_model_dir(model_dir, auto_download=False)
+    selection = select_model_dir(model_dir, auto_download=False)
+    folder = selection.folder if selection is not None else None
     files = available_models(model_dir)
     status: dict[str, Any] = {
         "labeler_version": info["version"],
         "labeler_commit": info["source_commit"],
         "model_dir": str(folder) if folder is not None else None,
+        "model_source": selection.source if selection is not None else None,
         "models_ok": folder is not None,
         "search_diagnostic": diagnostic_search_report(override=model_dir),
     }
@@ -114,51 +168,101 @@ def backend_status(*, model_dir: str | None = None) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def read_swc_text(path: str | os.PathLike) -> str:
+    """The file's text with every byte kept (see :func:`swc_io.decode_swc_bytes`)."""
+    return decode_swc_bytes(Path(path).read_bytes())
+
+
 def _parse_swc(path: Path) -> tuple[list[str], list[dict[str, Any]]]:
-    headers: list[str] = []
-    rows: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8", errors="ignore") as fh:
-        for line in fh:
-            s = line.strip()
-            if not s:
-                continue
-            if s.startswith("#"):
-                headers.append(line.rstrip("\n"))
-                continue
-            parts = s.split()
-            if len(parts) < 7:
-                continue
-            try:
-                rid = int(float(parts[0]))
-                rtype = int(float(parts[1]))
-                x = float(parts[2])
-                y = float(parts[3])
-                z = float(parts[4])
-                radius = float(parts[5])
-                parent = int(float(parts[6]))
-            except Exception:
-                continue
-            rows.append({"id": rid, "type": rtype, "x": x, "y": y, "z": z,
-                         "radius": radius, "parent": parent})
-    return headers, rows
+    """``(comment_lines, node_rows)`` of the file, node lines in file order."""
+    return swc_data_rows_from_text(read_swc_text(path))
 
 
-def _write_swc(
-    path: Path,
-    headers: list[str],
-    rows: list[dict[str, Any]],
-    types: list[int],
-    radii: list[float],
-) -> None:
-    with path.open("w", encoding="utf-8") as fh:
-        for h in headers:
-            fh.write(f"{h}\n")
-        for i, row in enumerate(rows):
-            fh.write(
-                f"{int(row['id'])} {int(types[i])} "
-                f"{float(row['x']):.10g} {float(row['y']):.10g} {float(row['z']):.10g} "
-                f"{float(radii[i]):.10g} {int(row['parent'])}\n"
-            )
+def _radius_changed(old: float, new: float) -> bool:
+    old, new = float(old), float(new)
+    return not (old == new or (math.isnan(old) and math.isnan(new)))
+
+
+def labeled_text(text: str, rows: list[dict[str, Any]], types: list[int], radii: list[float]) -> str:
+    """``text`` with the labeling result written in: the type field of each node
+    whose type changed, and the radius field of each node whose radius changed.
+
+    ``rows`` are the node rows parsed from ``text`` (as ``FileResult.rows``),
+    ``types`` and ``radii`` the result for each. Every other byte of ``text`` is
+    kept (see :func:`swc_io.rewrite_swc_fields`). Raises ``ValueError`` when the
+    rows are not the node lines of ``text``.
+    """
+    _headers, current = swc_data_rows_from_text(text)
+    if [(r["id"], r["type"], r["parent"]) for r in current] != \
+            [(int(r["id"]), int(r["type"]), int(r["parent"])) for r in rows]:
+        raise ValueError("the file's node lines are not the ones that were labeled "
+                         "(was it changed while labeling ran?)")
+    new_types = {int(r["id"]): int(t) for r, t in zip(rows, types) if int(t) != int(r["type"])}
+    new_radii = {int(r["id"]): float(rad) for r, rad in zip(rows, radii)
+                 if _radius_changed(r["radius"], rad)}
+    return rewrite_swc_fields(text, new_types, new_radii)
+
+
+def _write_labeled_copy(path: Path, text: str, rows: list[dict[str, Any]],
+                        types: list[int], radii: list[float]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(encode_swc_text(labeled_text(text, rows, types, radii)))
+
+
+def _id_list(ids: list[int], limit: int = 10) -> str:
+    shown = ", ".join(str(i) for i in ids[:limit])
+    return shown + (f" and {len(ids) - limit} more" if len(ids) > limit else "")
+
+
+def structural_violations(rows: list[dict[str, Any]]) -> list[str]:
+    """What is wrong with the node lines themselves, before the labeler reads them.
+
+    Labels are matched back to the file by node id, and the labeler's own
+    checks do not see a node detached in a loop of parent links. So a node id
+    used on more than one line, a node that is its own parent, and parent
+    links that form a loop are rejected here. Returns the reasons; empty when
+    the rows pass.
+    """
+    counts = Counter(int(r["id"]) for r in rows)
+    duplicated = sorted(i for i, n in counts.items() if n > 1)
+    if duplicated:
+        # Parent links cannot be followed while an id names two nodes.
+        noun = "node id" if len(duplicated) == 1 else "node ids"
+        return [f"{noun} used on more than one line: {_id_list(duplicated)}"]
+    reasons: list[str] = []
+    parent_of = {int(r["id"]): int(r["parent"]) for r in rows}
+    own_parent = sorted(i for i, p in parent_of.items() if p == i)
+    if own_parent:
+        reasons.append(f"node {_id_list(own_parent)} is its own parent" if len(own_parent) == 1
+                       else f"nodes {_id_list(own_parent)} are their own parents")
+    # Follow each node's parent links; a walk that comes back to a node of
+    # the same walk has found a loop. Each node is walked once.
+    done: set[int] = set()
+    in_loop: set[int] = set()
+    for start in parent_of:
+        if start in done:
+            continue
+        position: dict[int, int] = {}
+        path: list[int] = []
+        node = start
+        while node in parent_of and node not in done:
+            if node in position:
+                in_loop.update(path[position[node]:])
+                break
+            position[node] = len(path)
+            path.append(node)
+            node = parent_of[node]
+        done.update(path)
+    loop = sorted(in_loop - set(own_parent))
+    if loop:
+        reasons.append(f"parent links form a loop through nodes {_id_list(loop)}")
+    return reasons
+
+
+def _reject_broken_structure(name: str, rows: list[dict[str, Any]]) -> None:
+    reasons = structural_violations(rows)
+    if reasons:
+        raise ValueError(f"{name}: QC rejected; " + "; ".join(reasons))
 
 
 def _check_auto_label_eligibility(rows: list[dict[str, Any]]) -> str | None:
@@ -238,7 +342,10 @@ def _build_change_details(
 @dataclass
 class _Labeled:
     """One file run through the labeler, before the user's label options apply."""
-    labels: list[int]               # the labeler's type for each SWC row
+    # The labeler's type for each SWC row; None for a node the labeler did not
+    # label (see ``_labels_for_rows``), which keeps its type.
+    labels: list[int | None]
+    unlabeled_ids: list[int]        # ids of those nodes, in file order
     cell_type: str                  # class used for labeling: "pyramidal" or "interneuron"
     cell_type_source: str           # "user" or "stage1"
     stage1_cell_type: str           # Stage 1's own prediction
@@ -301,13 +408,96 @@ def _score_flag(nodes: list, result: Any, folder: Path, labeled_class: str,
     return base
 
 
-def _label_file(path: Path, rows: list[dict[str, Any]], opts: BatchOptions, folder: Path) -> _Labeled:
+def _soma_ids_before_merge(rows: list[dict[str, Any]]) -> set[int]:
+    """The nodes the labeler's parse takes as soma before merging the soma.
+
+    That is the nodes typed soma; in a file with no node typed soma and a
+    single root, the root and the points around it that draw the soma
+    (``parse_swc_for_labeling``'s own rule, applied to the same rows).
+    """
+    soma = {int(r["id"]) for r in rows if int(r["type"]) == 1}
+    if soma or not rows:
+        return soma
+    roots = [r for r in rows if int(r["parent"]) == -1]
+    if len(roots) != 1:
+        return soma
+    from swcstudio.core.labeler.features import SWCNode  # noqa: PLC0415
+    from swcstudio.core.labeler.infer_pipeline import _soma_points_by_shape  # noqa: PLC0415
+
+    raw = [SWCNode(int(r["id"]), int(r["type"]), float(r["x"]), float(r["y"]), float(r["z"]),
+                   float(r["radius"]), int(r["parent"])) for r in rows]
+    root = raw[rows.index(roots[0])]
+    return {root.id} | {raw[i].id for i in _soma_points_by_shape(raw, root)}
+
+
+def _labels_for_rows(rows: list[dict[str, Any]], label_by_id: dict[int, int]
+                     ) -> tuple[list[int | None], list[int]]:
+    """The label of each row, and the ids of the rows left unlabeled.
+
+    The labeler's parse merges the points of a soma into one node, so a soma
+    point it merged away has no label of its own and is labeled soma, as the
+    labeler's writer does. The same parse also folds into the soma a branch
+    leaving it that holds no standard type at all (type 0 or a custom type
+    throughout): such a node was not soma in the input and is not written as
+    soma; it gets ``None`` and keeps its type.
+    """
+    soma = _soma_ids_before_merge(rows)
+    labels: list[int | None] = []
+    unlabeled: list[int] = []
+    for r in rows:
+        rid = int(r["id"])
+        if rid in label_by_id:
+            labels.append(label_by_id[rid])
+        elif rid in soma:
+            labels.append(1)
+        else:
+            labels.append(None)
+            unlabeled.append(rid)
+    return labels, unlabeled
+
+
+def unlabeled_warning(count: int) -> list[str]:
+    """The warning for nodes the labeler left unlabeled, or nothing."""
+    if count <= 0:
+        return []
+    return [f"{count} node{'s' if count != 1 else ''} on a branch with no standard type "
+            f"{'were' if count != 1 else 'was'} left unlabeled"]
+
+
+@contextmanager
+def _labeler_input(path: Path, text: str) -> Iterator[Path]:
+    """The file the labeler should parse for ``path``, whose text is ``text``.
+
+    The labeler's parser does not drop a byte order mark, so a node line that
+    starts with one would be lost (a soma written first: "no soma node").
+    Such a file is handed to the labeler as a temporary copy without the
+    marks; any other file is parsed where it is.
+    """
+    if BOM not in text:
+        yield path
+        return
+    cleaned = "".join(strip_line_bom(content) + brk for content, brk in split_swc_lines(text))
+    fd, tmp = tempfile.mkstemp(prefix="swcstudio-label-", suffix=".swc")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(encode_swc_text(cleaned))
+        yield Path(tmp)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _label_file(path: Path, rows: list[dict[str, Any]], opts: BatchOptions, folder: Path,
+                text: str | None = None) -> _Labeled:
     """Run the labeler on ``path`` and match its labels to the parsed ``rows``.
 
     The labeler parses the file itself; that parse merges a soma drawn with
     several points into one node and keeps every other node's id, so labels are
     matched to rows by id and the merged soma points are labeled soma, exactly
-    as the labeler writes a labeled file.
+    as the labeler writes a labeled file. ``rows`` must have passed
+    :func:`structural_violations`.
     """
     from swcstudio.core.labeler.infer_pipeline import parse_swc_for_labeling, run_pipeline_on_nodes  # noqa: PLC0415
     from swcstudio.core.labeler.qc import qc_violations  # noqa: PLC0415
@@ -315,7 +505,8 @@ def _label_file(path: Path, rows: list[dict[str, Any]], opts: BatchOptions, fold
 
     s1_path = folder / MODEL_FILES["stage1"]
     s2_path = folder / MODEL_FILES["stage2"]
-    nodes, notes = parse_swc_for_labeling(path)
+    with _labeler_input(path, read_swc_text(path) if text is None else text) as source:
+        nodes, notes = parse_swc_for_labeling(source)
     reasons = qc_violations(nodes)
     qc_result = {"passed": not reasons, "reasons": list(reasons), "n_nodes": len(nodes)}
     if reasons:
@@ -340,35 +531,38 @@ def _label_file(path: Path, rows: list[dict[str, Any]], opts: BatchOptions, fold
     if len(label_by_id) != len(nodes):
         raise ValueError(f"{path.name}: node ids are not unique, so labels cannot be matched to rows")
     row_ids = [int(r["id"]) for r in rows]
-    if not set(label_by_id) <= set(row_ids):
+    if len(set(row_ids)) != len(row_ids) or not set(label_by_id) <= set(row_ids):
         raise ValueError(f"{path.name}: the file's node rows do not match the labeled parse")
-    labels = [label_by_id.get(rid, 1) for rid in row_ids]
+    labels, unlabeled_ids = _labels_for_rows(rows, label_by_id)
 
     flag_result = None
     if bool(getattr(opts, "flag_enabled", True)):
         flag_result = _score_flag(nodes, result, folder, labeled_class, stage1, mismatch)
 
     return _Labeled(
-        labels=labels, cell_type=labeled_class,
+        labels=labels, unlabeled_ids=unlabeled_ids, cell_type=labeled_class,
         cell_type_source="user" if chosen is not None else "stage1",
         stage1_cell_type=stage1.cell_type, stage1_confidence=float(stage1.confidence),
         class_mismatch=mismatch, qc_result=qc_result, notes=list(notes), flag_result=flag_result,
     )
 
 
-def _apply_options(rows: list[dict[str, Any]], labels: list[int], opts: BatchOptions
+def _apply_options(rows: list[dict[str, Any]], labels: list[int | None], opts: BatchOptions
                    ) -> tuple[list[int], list[float], int, int]:
     """The user's label options and radius cleanup on top of the labeler's labels.
 
     ``opts.soma`` / ``axon`` / ``basal`` / ``apic`` choose which predicted labels
-    are written; a switched-off label keeps the node's original type.
+    are written; a switched-off label, or no label (``None``), keeps the node's
+    original type.
     ``opts.rad`` copies the parent's radius onto nodes whose radius is not positive.
     """
     orig_types = [int(r["type"]) for r in rows]
     enabled = {t for t, on in ((2, opts.axon), (3, opts.basal), (4, opts.apic)) if on}
     final_types: list[int] = []
     for old_t, new_t in zip(orig_types, labels):
-        if new_t == 1:
+        if new_t is None:
+            final_types.append(old_t)
+        elif new_t == 1:
             final_types.append(1 if opts.soma else old_t)
         elif new_t in (2, 3, 4) and new_t in enabled:
             final_types.append(new_t)
@@ -401,7 +595,8 @@ def _apply_options(rows: list[dict[str, Any]], labels: list[int], opts: BatchOpt
                 radii[idx] = radii[pidx]
 
     type_changes = sum(1 for old, new in zip(orig_types, final_types) if old != new)
-    radius_changes = sum(1 for old, new in zip(radii_orig, radii) if old != new)
+    # NaN != NaN: an unchanged NaN radius is not a change.
+    radius_changes = sum(1 for old, new in zip(radii_orig, radii) if _radius_changed(old, new))
     return final_types, radii, type_changes, radius_changes
 
 
@@ -423,25 +618,130 @@ def _flag_summary(flag_result: dict[str, Any] | None) -> str:
 # ---------------------------------------------------------------------------
 
 
-def label_warnings(cell_type: str | None, out_type_counts: dict[int, int] | None) -> list[str]:
+def _type_count(counts: dict[Any, Any], t: int) -> int:
+    return int(counts.get(t, counts.get(str(t), 0)) or 0)
+
+
+def label_warnings(cell_type: str | None, out_type_counts: dict[int, int] | None,
+                   input_type_counts: dict[int, int] | None = None) -> list[str]:
     """The compartments a labeled cell of its class should have but has no node of.
 
     The labeler gives each primary subtree one label and does not force an
     axon, so a cell can come back without one. Saying so in the batch results
-    spares reviewers from finding it by eye.
+    spares reviewers from finding it by eye. When the input was labeled
+    (``input_type_counts`` has an axon or dendrite node) and has no node of
+    that compartment either, the warning says so: the tracing may simply not
+    include it.
     """
     if out_type_counts is None:
         return []
     if cell_type == "pyramidal":
-        expected = {2: "axon", 3: "basal dendrite", 4: "apical dendrite"}
+        expected = {2: ("axon", (2,)), 3: ("basal dendrite", (3,)), 4: ("apical dendrite", (4,))}
     else:
-        expected = {2: "axon", 3: "dendrite"}
-    return [f"no {name} labeled" for t, name in expected.items() if int(out_type_counts.get(t, 0)) == 0]
+        # A 2-class dendrite is written as type 3; an input may draw it as 3 or 4.
+        expected = {2: ("axon", (2,)), 3: ("dendrite", (3, 4))}
+    inputs = dict(input_type_counts or {})
+    input_labeled = any(_type_count(inputs, t) for t in (2, 3, 4))
+    out: list[str] = []
+    for t, (name, input_types) in expected.items():
+        if _type_count(out_type_counts, t):
+            continue
+        text = f"no {name} labeled"
+        if input_labeled and not any(_type_count(inputs, it) for it in input_types):
+            text += " (none in the input either)"
+        out.append(text)
+    return out
 
 
 def _warning_text(record: dict[str, Any]) -> str:
     warnings = list(record.get("warnings") or [])
     return f", WARNING: {'; '.join(warnings)}" if warnings else ""
+
+
+def batch_flag_text(record: dict[str, Any], *, flag_enabled: bool,
+                    flag_result: dict[str, Any] | None = None) -> str:
+    """The flag part of a batch's per-file line, from the record's final decision.
+
+    Call it after :func:`apply_flag_budget`, which decides ``flagged``.
+    """
+    if not flag_enabled:
+        return "flag=off"
+    if record.get("suspicion") is None and not record.get("class_mismatch"):
+        reason = (flag_result or {}).get("reason")
+        return f"flag=not scored ({reason})" if reason else "flag=not scored"
+    f1 = record.get("predicted_f1")
+    f1_txt = f", predicted_f1={float(f1):.3f}" if f1 is not None else ""
+    reason = record.get("flag_reason")
+    return f"flag={bool(record.get('flagged'))}{f1_txt}" + (f" ({reason})" if reason else "")
+
+
+def batch_file_line(record: dict[str, Any], *, radius_changes: int, out_type_counts: dict[int, int] | None,
+                    flag_enabled: bool, flag_result: dict[str, Any] | None = None) -> str:
+    """One labeled file's line in a batch report, after the flag budget is applied."""
+    counts = dict(out_type_counts or {})
+    return (
+        f"{record['file']}: nodes={int(record.get('nodes') or 0)}, "
+        f"type_changes={int(record.get('type_changes') or 0)}, radius_changes={int(radius_changes)}, "
+        f"cell_class={cell_class_name(record.get('cell_type'))} ({record.get('cell_class_source') or 'auto'}), "
+        f"{batch_flag_text(record, flag_enabled=flag_enabled, flag_result=flag_result)}, "
+        "out_types(soma/axon/basal/apic)="
+        f"{_type_count(counts, 1)}/{_type_count(counts, 2)}/{_type_count(counts, 3)}/{_type_count(counts, 4)}"
+        f"{_warning_text(record)}"
+    )
+
+
+def batch_report_text(
+    *,
+    folder: str | os.PathLike,
+    files_total: int,
+    files_processed: int,
+    failed_files: list[tuple[str, str]],
+    files_with_warnings: int,
+    per_file: list[str],
+    files_flagged: int | None = None,
+    flag_review_path: str | None = None,
+    model_record: dict[str, Any] | None = None,
+    totals: dict[str, int] | None = None,
+    out_dir: str | None = None,
+    zip_path: str | None = None,
+    change_details: list[str] | None = None,
+) -> str:
+    """The text report of an auto-labeling batch; the GUI, the CLI and
+    :func:`run_batch` write the same one. ``failed_files`` are ``(file, error)``."""
+    qc_failed = sum(1 for _name, error in failed_files if "QC rejected" in str(error))
+    lines = [
+        "Auto-labeling batch report",
+        f"Generated: {datetime.now().isoformat(timespec='seconds')}",
+        f"Folder: {folder}",
+    ]
+    if model_record:
+        lines.append(f"Models: {model_record.get('model_dir')} ({model_record.get('model_source')}), "
+                     f"labeler {model_record.get('model_version')}, "
+                     f"model set sha256 {model_record.get('model_sha')}")
+    if out_dir:
+        lines.append(f"Labeled copies: {out_dir}")
+    if zip_path:
+        lines.append(f"Zip: {zip_path}")
+    lines += [
+        f"SWC files: {int(files_total)}",
+        f"Labeled: {int(files_processed)}",
+        f"Labeled with warnings: {int(files_with_warnings)}",
+        f"Not labeled: {len(failed_files)} ({qc_failed} failed the structural checks, "
+        f"{len(failed_files) - qc_failed} errors)",
+    ]
+    if totals:
+        lines.append(f"Nodes: {int(totals.get('nodes', 0))}, type changes: {int(totals.get('type_changes', 0))}, "
+                     f"radius changes: {int(totals.get('radius_changes', 0))}")
+    if files_flagged is not None:
+        lines.append(f"Flagged for review: {int(files_flagged)}"
+                     + (f" (flag review: {flag_review_path})" if flag_review_path else ""))
+    else:
+        lines.append("Flagged for review: quality flag off")
+    lines += ["", "Per file:", *(per_file or ["(none)"]), "", "Not labeled:",
+              *([f"{name}: {error}" for name, error in failed_files] or ["(none)"])]
+    if change_details:
+        lines += ["", "Node changes:", *change_details]
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def flag_record(path: Path, out_path: Path | None, labeled: Any | None,
@@ -478,7 +778,8 @@ def flag_record(path: Path, out_path: Path | None, labeled: Any | None,
             notes=list(getattr(labeled, "notes", []) or []),
         )
         counts = out_type_counts if out_type_counts is not None else getattr(labeled, "out_type_counts", None)
-        rec["warnings"] = label_warnings(labeled.cell_type, counts)
+        rec["warnings"] = (label_warnings(labeled.cell_type, counts, getattr(labeled, "input_type_counts", None))
+                           + unlabeled_warning(int(getattr(labeled, "unlabeled_nodes", 0) or 0)))
     return rec
 
 
@@ -553,73 +854,26 @@ def write_flag_review(json_path: Path, records: list[dict[str, Any]], *, budget:
 # ---------------------------------------------------------------------------
 
 
-def _model_folder(model_dir: str | None) -> Path:
-    ok, reason = is_available(model_dir=model_dir)
-    if not ok:
-        raise FileNotFoundError(reason)
-    folder = resolve_model_dir(model_dir)
-    assert folder is not None
-    return folder
-
-
-def run_file(
-    file_path: str,
-    opts: BatchOptions,
-    *,
-    output_path: str | None = None,
-    write_output: bool = True,
-    write_log: bool = True,
-    model_dir: str | None = None,
-) -> FileResult:
-    """Run the auto-labeler on one SWC file."""
-    folder = _model_folder(model_dir)
-    in_path = Path(file_path)
-    headers, rows = _parse_swc(in_path)
+def _run_one(in_path: Path, text: str, opts: BatchOptions, selection: ModelSelection,
+             record: dict[str, Any]) -> FileResult:
+    """Label one file's ``text``; nothing is written."""
+    headers, rows = swc_data_rows_from_text(text)
+    _reject_broken_structure(in_path.name, rows)
     ineligible = _check_auto_label_eligibility(rows)
     if ineligible is not None:
         raise ValueError(f"{in_path.name}: {ineligible}")
-    labeled = _label_file(in_path, rows, opts, folder)
+    labeled = _label_file(in_path, rows, opts, selection.folder, text)
 
     orig_types = [int(r["type"]) for r in rows]
     orig_radii = [float(r["radius"]) for r in rows]
     types, radii, type_changes, radius_changes = _apply_options(rows, labeled.labels, opts)
-
-    out_path: Path | None = None
-    run_timestamp = timestamp_slug()
-    if write_output:
-        out_path = (Path(output_path) if output_path
-                    else operation_output_path_for_file(in_path, "auto_typing", timestamp=run_timestamp))
-        _write_swc(out_path, headers, rows, types, radii)
-
     out_counts = _out_counts(types)
-    change_details = _build_change_details(in_path.name, rows, orig_types, types, orig_radii, radii)
-    flagged = bool(labeled.flag_result and labeled.flag_result.get("flagged"))
-
-    log_path: str | None = None
-    if write_log:
-        log_target = (auto_typing_log_path_for_file(in_path) if output_path
-                      else operation_report_path_for_file(in_path, "auto_typing", timestamp=run_timestamp))
-        payload = {
-            "folder": str(in_path.parent),
-            "out_dir": str(out_path.parent if out_path is not None else in_path.parent),
-            "zip_path": None, "files_total": 1, "files_processed": 1, "files_failed": 0,
-            "files_qc_failed": 0, "total_nodes": len(rows), "total_type_changes": type_changes,
-            "total_radius_changes": radius_changes, "files_flagged": int(flagged), "failures": [],
-            "per_file": [
-                f"{in_path.name}: nodes={len(rows)}, type_changes={type_changes}, "
-                f"radius_changes={radius_changes}, cell_class={cell_class_name(labeled.cell_type)} "
-                f"({'user' if labeled.cell_type_source == 'user' else 'auto'}), "
-                f"{_flag_summary(labeled.flag_result)}, "
-                f"out_types(soma/axon/basal/apic)={out_counts[1]}/{out_counts[2]}/"
-                f"{out_counts[3]}/{out_counts[4]}"
-            ],
-            "change_details": change_details,
-        }
-        log_path = write_text_report(log_target, format_auto_typing_report_text(payload))
-
+    input_counts = _out_counts(orig_types)
+    warnings = (label_warnings(labeled.cell_type, out_counts, input_counts)
+                + unlabeled_warning(len(labeled.unlabeled_ids)))
     return FileResult(
         input_file=str(in_path),
-        output_file=str(out_path) if out_path is not None else None,
+        output_file=None,
         nodes_total=len(rows),
         type_changes=type_changes,
         radius_changes=radius_changes,
@@ -630,8 +884,8 @@ def run_file(
         qc_result=labeled.qc_result,
         flag_result=labeled.flag_result,
         failures=[],
-        change_details=change_details,
-        log_path=log_path,
+        change_details=_build_change_details(in_path.name, rows, orig_types, types, orig_radii, radii),
+        log_path=None,
         headers=headers,
         rows=rows,
         types=types,
@@ -640,7 +894,72 @@ def run_file(
         class_mismatch=labeled.class_mismatch,
         notes=labeled.notes,
         labeler_version=labeler_info()["version"],
+        model_record=dict(record),
+        warnings=warnings,
+        unlabeled_nodes=len(labeled.unlabeled_ids),
+        input_type_counts=input_counts,
     )
+
+
+def _single_file_report_text(res: FileResult) -> str:
+    counts = res.out_type_counts
+    lines = [
+        "Auto-labeling report",
+        f"Generated: {datetime.now().isoformat(timespec='seconds')}",
+        f"Input: {res.input_file}",
+        f"Output: {res.output_file or '(not written)'}",
+    ]
+    rec = res.model_record or {}
+    if rec:
+        lines.append(f"Models: {rec.get('model_dir')} ({rec.get('model_source')}), labeler "
+                     f"{rec.get('model_version')}, model set sha256 {rec.get('model_sha')}")
+    lines.append(
+        f"{Path(res.input_file).name}: nodes={res.nodes_total}, type_changes={res.type_changes}, "
+        f"radius_changes={res.radius_changes}, cell_class={cell_class_name(res.cell_type)} "
+        f"({'user' if res.cell_type_source == 'user' else 'auto'}), {_flag_summary(res.flag_result)}, "
+        f"out_types(soma/axon/basal/apic)={counts[1]}/{counts[2]}/{counts[3]}/{counts[4]}"
+        + (f", WARNING: {'; '.join(res.warnings)}" if res.warnings else ""))
+    if res.notes:
+        lines += ["", "Notes:", *res.notes]
+    if res.change_details:
+        lines += ["", "Node changes:", *res.change_details]
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def run_file(
+    file_path: str,
+    opts: BatchOptions,
+    *,
+    output_path: str | None = None,
+    write_output: bool = True,
+    write_log: bool = True,
+    model_dir: str | None = None,
+    models: ModelSelection | None = None,
+) -> FileResult:
+    """Run the auto-labeler on one SWC file.
+
+    ``models`` is a folder already resolved with :func:`resolve_models`;
+    without it, ``model_dir`` and the usual search decide. The input file is
+    not changed. With ``write_output``, a labeled copy is written: the input
+    with only the relabeled type fields rewritten.
+    """
+    selection = models if models is not None else resolve_models(model_dir)
+    record = model_record(selection.folder, selection.source)
+    in_path = Path(file_path)
+    text = read_swc_text(in_path)
+    res = _run_one(in_path, text, opts, selection, record)
+
+    run_timestamp = timestamp_slug()
+    if write_output:
+        out_path = (Path(output_path) if output_path
+                    else operation_output_path_for_file(in_path, "auto_typing", timestamp=run_timestamp))
+        _write_labeled_copy(out_path, text, res.rows, res.types, res.radii)
+        res.output_file = str(out_path)
+    if write_log:
+        log_target = (auto_typing_log_path_for_file(in_path) if output_path
+                      else operation_report_path_for_file(in_path, "auto_typing", timestamp=run_timestamp))
+        res.log_path = write_text_report(log_target, _single_file_report_text(res))
+    return res
 
 
 def run_batch(
@@ -648,6 +967,7 @@ def run_batch(
     opts: BatchOptions,
     *,
     model_dir: str | None = None,
+    models: ModelSelection | None = None,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> BatchResult:
     """Run the auto-labeler on every ``.swc`` file in ``folder``.
@@ -655,123 +975,116 @@ def run_batch(
     Labeled copies go to a new output folder created inside ``folder``
     (``<folder>_batch_auto_typing_<timestamp>``), together with a text report and
     the flag review (``flag_review.json`` / ``.csv``); the source files are not
-    changed.
+    changed. Each copy is its source with only the relabeled type fields
+    rewritten.
     ``progress_callback(index, total, current_filename)`` is invoked once per
     file before processing it.
     """
-    model_folder = _model_folder(model_dir)
+    selection = models if models is not None else resolve_models(model_dir)
+    record = model_record(selection.folder, selection.source)
     in_dir = Path(folder)
     swc_files = sorted(p for p in in_dir.iterdir() if is_swc_data_file(p))
     run_timestamp = timestamp_slug()
     out_dir = operation_output_dir_for_folder(in_dir, "batch_auto_typing", timestamp=run_timestamp)
+    flag_enabled = bool(getattr(opts, "flag_enabled", True))
 
-    failures: list[str] = []
-    per_file: list[str] = []
+    failed_files: list[tuple[str, str]] = []
     change_details: list[str] = []
-    records: list[dict[str, Any]] = []
-    processed = total_nodes = total_type_changes = total_radius_changes = files_qc_failed = 0
+    labeled_items: list[tuple[FileResult, dict[str, Any]]] = []
+    unlabeled_records: list[dict[str, Any]] = []
+    totals = {"nodes": 0, "type_changes": 0, "radius_changes": 0}
 
     for idx, swc_path in enumerate(swc_files):
         if progress_callback is not None:
             progress_callback(idx, len(swc_files), swc_path.name)
         try:
-            headers, rows = _parse_swc(swc_path)
-            ineligible = _check_auto_label_eligibility(rows)
-            if ineligible is not None:
-                failures.append(f"{swc_path.name}: skipped — {ineligible}")
-                records.append(flag_record(swc_path, None, None, len(rows), 0, error=ineligible))
-                continue
-            try:
-                labeled = _label_file(swc_path, rows, opts, model_folder)
-            except ValueError as exc:
-                if "QC rejected" not in str(exc):
-                    raise
-                files_qc_failed += 1
-                reasons = str(exc).split("QC rejected; ", 1)[-1].split("; ")
-                per_file.append(f"{swc_path.name}: QC rejected; skipped auto-labeling; "
-                                f"reasons={'; '.join(reasons)}")
-                records.append(flag_record(swc_path, None, None, len(rows), 0, qc_reasons=reasons))
-                continue
-
-            orig_types = [int(r["type"]) for r in rows]
-            orig_radii = [float(r["radius"]) for r in rows]
-            types, radii, type_changes, radius_changes = _apply_options(rows, labeled.labels, opts)
+            text = read_swc_text(swc_path)
+            res = _run_one(swc_path, text, opts, selection, record)
             out_path = operation_output_path_for_file(swc_path, "batch_auto_typing", output_dir=out_dir,
                                                       timestamp=run_timestamp)
-            _write_swc(out_path, headers, rows, types, radii)
+            _write_labeled_copy(out_path, text, res.rows, res.types, res.radii)
+            res.output_file = str(out_path)
+        except Exception as exc:  # noqa: BLE001 - one bad file does not stop the batch
+            error = str(exc)
+            prefix = f"{swc_path.name}: "
+            error = error[len(prefix):] if error.startswith(prefix) else error
+            failed_files.append((swc_path.name, error))
+            qc = error.split("QC rejected; ", 1)[1].split("; ") if "QC rejected; " in error else None
+            unlabeled_records.append(flag_record(swc_path, None, None, 0, 0, qc_reasons=qc,
+                                                 error=None if qc else error))
+            continue
+        totals["nodes"] += res.nodes_total
+        totals["type_changes"] += res.type_changes
+        totals["radius_changes"] += res.radius_changes
+        labeled_items.append((res, flag_record(swc_path, out_path, res, res.nodes_total, res.type_changes)))
+        change_details.extend(res.change_details)
 
-            processed += 1
-            total_nodes += len(rows)
-            total_type_changes += type_changes
-            total_radius_changes += radius_changes
-            out_counts = _out_counts(types)
-            records.append(flag_record(swc_path, out_path, labeled, len(rows), type_changes,
-                                       out_type_counts=out_counts))
-            per_file.append(
-                f"{swc_path.name}: nodes={len(rows)}, type_changes={type_changes}, "
-                f"radius_changes={radius_changes}, cell_class={cell_class_name(labeled.cell_type)} "
-                f"({'user' if labeled.cell_type_source == 'user' else 'auto'}), "
-                f"{_flag_summary(labeled.flag_result)}, "
-                f"out_types(soma/axon/basal/apic)={out_counts[1]}/{out_counts[2]}/"
-                f"{out_counts[3]}/{out_counts[4]}"
-                f"{_warning_text(records[-1])}"
-            )
-            change_details.extend(_build_change_details(swc_path.name, rows, orig_types, types,
-                                                        orig_radii, radii))
-        except Exception as e:  # noqa: BLE001
-            failures.append(f"{swc_path.name}: {e}")
-            records.append(flag_record(swc_path, None, None, 0, 0, error=str(e)))
-
+    records = [rec for _res, rec in labeled_items] + unlabeled_records
     budget = float(getattr(opts, "flag_budget", 0.10))
     flag_review_path: str | None = None
-    files_flagged = 0
-    if bool(getattr(opts, "flag_enabled", True)):
+    files_flagged: int | None = None
+    if flag_enabled:
         apply_flag_budget(records, budget)
         files_flagged = sum(1 for r in records if r.get("flagged"))
         flag_review_path = str(write_flag_review(out_dir / FLAG_REVIEW_JSON, records, budget=budget,
                                                  folder=str(in_dir), timestamp=run_timestamp))
+    # Built after the budget, so each line says the file's final flag.
+    per_file = [batch_file_line(rec, radius_changes=res.radius_changes, out_type_counts=res.out_type_counts,
+                                flag_enabled=flag_enabled, flag_result=res.flag_result)
+                for res, rec in labeled_items]
+    failures = [f"{name}: {error}" for name, error in failed_files]
+    files_qc_failed = sum(1 for _name, error in failed_files if "QC rejected" in error)
+    files_with_warnings = sum(1 for _res, rec in labeled_items if rec.get("warnings"))
 
+    out_dir.mkdir(parents=True, exist_ok=True)
     zip_path: str | None = None
-    if opts.zip_output and processed > 0:
+    if opts.zip_output and labeled_items:
         zip_target = in_dir / f"{out_dir.name}.zip"
         with zipfile.ZipFile(zip_target, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for f in sorted(out_dir.glob("*.swc")):
                 zf.write(f, arcname=f"{out_dir.name}/{f.name}")
         zip_path = str(zip_target)
 
-    payload = {
-        "folder": str(in_dir), "out_dir": str(out_dir), "zip_path": zip_path,
-        "files_total": len(swc_files), "files_processed": processed, "files_failed": len(failures),
-        "files_qc_failed": files_qc_failed, "total_nodes": total_nodes,
-        "total_type_changes": total_type_changes, "total_radius_changes": total_radius_changes,
-        "files_flagged": files_flagged, "failures": failures, "per_file": per_file,
-        "change_details": change_details,
-    }
     log_path = write_text_report(
         operation_report_path_for_folder(in_dir, "batch_auto_typing", output_dir=out_dir,
                                          timestamp=run_timestamp),
-        format_auto_typing_report_text(payload),
+        batch_report_text(folder=in_dir, files_total=len(swc_files), files_processed=len(labeled_items),
+                          failed_files=failed_files, files_with_warnings=files_with_warnings,
+                          per_file=per_file, files_flagged=files_flagged, flag_review_path=flag_review_path,
+                          model_record=record, totals=totals, out_dir=str(out_dir), zip_path=zip_path,
+                          change_details=change_details),
     )
 
     return BatchResult(
         folder=str(in_dir), out_dir=str(out_dir), zip_path=zip_path,
-        files_total=len(swc_files), files_processed=processed, files_failed=len(failures),
-        files_qc_failed=files_qc_failed, total_nodes=total_nodes,
-        total_type_changes=total_type_changes, total_radius_changes=total_radius_changes,
-        files_flagged=files_flagged, failures=failures, per_file=per_file, log_path=log_path,
-        flag_records=records if bool(getattr(opts, "flag_enabled", True)) else None,
+        files_total=len(swc_files), files_processed=len(labeled_items), files_failed=len(failures),
+        files_qc_failed=files_qc_failed, files_with_warnings=files_with_warnings,
+        total_nodes=totals["nodes"], total_type_changes=totals["type_changes"],
+        total_radius_changes=totals["radius_changes"],
+        files_flagged=int(files_flagged or 0), failures=failures, per_file=per_file, log_path=log_path,
+        flag_records=records if flag_enabled else None,
         flag_review_path=flag_review_path,
-        flag_budget=budget if bool(getattr(opts, "flag_enabled", True)) else None,
+        flag_budget=budget if flag_enabled else None,
+        model_record=dict(record),
     )
 
 
 __all__ = [
     "is_available",
+    "resolve_models",
     "backend_status",
     "run_file",
     "run_batch",
+    "labeled_text",
+    "read_swc_text",
+    "structural_violations",
     "apply_flag_budget",
     "flag_record",
+    "label_warnings",
+    "unlabeled_warning",
+    "batch_flag_text",
+    "batch_file_line",
+    "batch_report_text",
     "write_flag_review",
     "FLAG_REVIEW_JSON",
     "FLAG_REVIEW_CSV",

@@ -17,7 +17,8 @@ node of an SWC file as soma, axon, basal dendrite or apical dendrite:
 End users reach this code through the CLI (``swcstudio auto-label``,
 ``swcstudio auto-typing``) or the GUI's Auto Label Editing panels and the Flag
 Review window. The model folder is resolved by :mod:`swcstudio.core.model_paths`;
-override it with ``--model-dir``, ``SWCSTUDIO_MODEL_DIR`` or the GUI selector.
+name one with ``--model-dir`` or the GUI selector, ``SWCSTUDIO_MODEL_DIR``, or
+``model_dir`` in the auto-typing configuration, in that order of precedence.
 """
 from __future__ import annotations
 
@@ -41,6 +42,8 @@ from .runner import (
     apply_flag_budget,
     backend_status,
     is_available,
+    labeled_text,
+    resolve_models,
     run_batch,
     run_file,
     write_flag_review,
@@ -65,7 +68,9 @@ __all__ = [
     "get_config",
     "save_config",
     "is_available",
+    "resolve_models",
     "backend_status",
+    "labeled_text",
     "run_file",
     "run_batch",
     "run_folder",

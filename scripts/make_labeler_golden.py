@@ -10,7 +10,10 @@ results:
   unlabeled copy of the first, every node typed 0.
 * ``tests/fixtures/labeler/expected.json`` -- for those cells and
   ``tests/fixtures/single-soma.swc``, the labels, cell class and flag the labeler
-  in ``--source`` gives, automatic and with each cell class given.
+  in ``--source`` gives, automatic and with each cell class given. The labels
+  are the type column of the file the labeler's own writer
+  (``write_labeled_swc``) produces, not a re-derivation of how labels map to
+  node lines, so the parity test also checks SWC-Studio's mapping.
 
 Run it with the labeler's own environment, from the SWC-Studio repository root:
 
@@ -22,6 +25,7 @@ import argparse
 import json
 import math
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -131,9 +135,30 @@ def write_fixtures() -> list[Path]:
     return paths + [FIX / "single-soma.swc"]
 
 
+def _written_types(path: Path) -> str:
+    """The type field of each node line of a labeled file, in file order, one
+    digit per node. Node lines are found with the labeler's own line filter."""
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if len(parts) < 7 or parts[0].startswith("#"):
+            continue
+        try:
+            int(float(parts[0])), int(float(parts[6]))
+            [float(v) for v in parts[2:6]]
+        except ValueError:
+            continue
+        out.append(str(int(float(parts[1]))))
+    return "".join(out)
+
+
 def expected_for(paths: list[Path], source: Path) -> dict:
     sys.path.insert(0, str(source))
-    from pipeline.infer_pipeline import parse_swc_for_labeling, run_pipeline_on_nodes  # noqa: PLC0415
+    from pipeline.infer_pipeline import (  # noqa: PLC0415
+        parse_swc_for_labeling,
+        run_pipeline_on_nodes,
+        write_labeled_swc,
+    )
     from pipeline.stage4.single_seed_flag import load_flag, score_flag  # noqa: PLC0415
 
     md = source / "pipeline" / "models" / "seed123"
@@ -141,15 +166,12 @@ def expected_for(paths: list[Path], source: Path) -> dict:
     flag = load_flag(md)
 
     def row_labels(path: Path, nodes, labels) -> str:
-        """The label of each node line, in file order, as one digit per node."""
-        by_id = {int(nd.id): int(lbl) for nd, lbl in zip(nodes, labels)}
-        out = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            parts = line.split()
-            if len(parts) < 7 or parts[0].startswith("#"):
-                continue
-            out.append(str(by_id.get(int(float(parts[0])), 1)))
-        return "".join(out)
+        """The labels as the labeler itself writes them: run its own writer
+        (``write_labeled_swc``) and read back the type of each node line."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / path.name
+            write_labeled_swc(path, nodes, labels, out)
+            return _written_types(out)
 
     result = {"labeler_commit": None, "cells": {}}
     try:

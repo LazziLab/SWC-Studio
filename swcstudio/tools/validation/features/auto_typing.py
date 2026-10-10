@@ -13,20 +13,19 @@ from typing import Any
 import pandas as pd
 
 from swcstudio.core.auto_typing import BatchOptions, run_file as _run_engine_file
+from swcstudio.core.auto_typing.runner import labeled_text, read_swc_text, resolve_models
 from swcstudio.core.auto_typing_results import (
     auto_typing_result_to_dataframe,
     merge_labeled_types_only,
 )
 from swcstudio.core.config import merge_config
+from swcstudio.core.model_paths import ModelSelection
 from swcstudio.core.reporting import (
     operation_output_path_for_file,
     resolve_requested_output_path_for_file,
     timestamp_slug,
 )
-from swcstudio.core.swc_io import (
-    parse_swc_text_preserve_tokens,
-    write_swc_to_bytes_preserve_tokens,
-)
+from swcstudio.core.swc_io import encode_swc_text, parse_swc_text_preserve_tokens
 from swcstudio.tools.batch_processing.features.auto_typing import (
     get_config as get_batch_auto_config,
 )
@@ -54,12 +53,22 @@ def run_file(
     output_path: str | None = None,
     write_output: bool = True,
     write_log: bool = True,
+    models: ModelSelection | None = None,
 ):
-    """Run auto-typing on a single file using the configured engine."""
+    """Run auto-typing on a single file using the configured engine.
+
+    The model folder is ``models`` when given (resolved once for a batch);
+    otherwise ``config_overrides["model_dir"]`` is the explicit choice, then
+    ``SWCSTUDIO_MODEL_DIR``, then ``model_dir`` in the saved configuration,
+    then the default search. The result carries ``model_record``.
+    """
     cfg = get_batch_auto_config()
     if isinstance(config_overrides, dict) and config_overrides:
         cfg = merge_config(cfg, config_overrides)
     opts = options if options is not None else _options_from_config(cfg)
+    if models is None:
+        argument = (config_overrides or {}).get("model_dir") if isinstance(config_overrides, dict) else None
+        models = resolve_models(str(argument).strip() or None if argument else None)
 
     return _run_engine_file(
         file_path,
@@ -67,7 +76,7 @@ def run_file(
         output_path=output_path,
         write_output=write_output,
         write_log=write_log,
-        model_dir=(cfg.get("model_dir") or None),
+        models=models,
     )
 
 
@@ -87,12 +96,22 @@ def auto_label_file(
     output_path: str | None = None,
     write_output: bool = True,
     write_log: bool = False,
+    models: ModelSelection | None = None,
 ) -> dict[str, Any]:
+    """Label one file and return the labeled file's bytes (``"bytes"``).
+
+    The bytes are the input file with only the type field of each relabeled
+    node line rewritten (and the radius field of a node whose radius a radius
+    option changed): comments stay where they are, inline comments, columns
+    after the seventh, spacing, line endings and a byte order mark are kept,
+    and lines that are not node lines are copied unchanged. The in-place
+    writers (CLI, GUI batch) commit these bytes.
+    """
     in_path = Path(file_path)
     if not in_path.exists():
         raise FileNotFoundError(file_path)
 
-    base_df = parse_swc_text_preserve_tokens(in_path.read_text(encoding="utf-8", errors="ignore"))
+    source_text = read_swc_text(in_path)
     result_obj = run_file(
         file_path,
         options=options,
@@ -100,10 +119,11 @@ def auto_label_file(
         output_path=None,
         write_output=False,
         write_log=write_log,
+        models=models,
     )
-    labeled_df = result_to_dataframe(result_obj)
-    merged_df = merge_types_only(base_df, labeled_df)
-    out_bytes = write_swc_to_bytes_preserve_tokens(merged_df)
+    out_text = labeled_text(source_text, result_obj.rows, result_obj.types, result_obj.radii)
+    out_bytes = encode_swc_text(out_text)
+    merged_df = parse_swc_text_preserve_tokens(out_text)
 
     out_path: Path | None = None
     run_timestamp = timestamp_slug()
@@ -122,8 +142,12 @@ def auto_label_file(
         "output_path": str(out_path) if out_path is not None else None,
         "nodes_total": int(getattr(result_obj, "nodes_total", 0)),
         "type_changes": int(getattr(result_obj, "type_changes", 0)),
-        "radius_changes": 0,
+        # Radii are written only when a radius option changed them.
+        "radius_changes": int(getattr(result_obj, "radius_changes", 0)),
         "out_type_counts": dict(getattr(result_obj, "out_type_counts", {}) or {}),
+        "model_record": dict(getattr(result_obj, "model_record", None) or {}),
+        "warnings": list(getattr(result_obj, "warnings", []) or []),
+        "unlabeled_nodes": int(getattr(result_obj, "unlabeled_nodes", 0) or 0),
         "cell_type": getattr(result_obj, "cell_type", None),
         "cell_type_source": getattr(result_obj, "cell_type_source", "stage1"),
         "stage1_cell_type": getattr(result_obj, "stage1_cell_type", None),

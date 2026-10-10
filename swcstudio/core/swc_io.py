@@ -1,6 +1,8 @@
 import io
+import math
 import os
-from collections.abc import Iterable
+import re
+from collections.abc import Iterable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -9,6 +11,163 @@ import pandas as pd
 
 SWC_COLS = ["id", "type", "x", "y", "z", "radius", "parent"]
 SWC_HEADER_ATTR = "swc_header_lines"
+
+# A UTF-8 byte order mark, as text. Some editors write one before the first
+# line; it is not whitespace to ``str.strip``/``str.split``, so a parser that
+# does not drop it reads the first line as garbage.
+BOM = "﻿"
+
+# Line terminators as text-mode ``open()`` (universal newlines) splits them,
+# which is how the labeler and the auto-label row parse read a file.
+_LINE_BREAK = re.compile(r"(\r\n|\r|\n)")
+# The first field (id), the whitespace after it, the type field, the whitespace
+# after it, then x, y, z, the radius field.
+_FIELDS_TO_RADIUS = re.compile(r"^(\s*\S+\s+)(\S+)(\s+\S+\s+\S+\s+\S+\s+)(\S+)")
+
+
+def strip_line_bom(line: str) -> str:
+    """``line`` without a byte order mark at its start.
+
+    A BOM belongs at the start of a file, but the ``# @PROV`` header lines are
+    spliced in above whatever the file starts with, so after an in-place edit
+    it can sit at the start of a later line; it is dropped there too.
+    """
+    return line[1:] if line.startswith(BOM) else line
+
+
+def split_swc_lines(text: str) -> list[tuple[str, str]]:
+    """``text`` as ``(content, line_break)`` pairs; joined back they give ``text``.
+
+    Lines break at ``\\r\\n``, ``\\r`` or ``\\n``, as text-mode ``open()`` reads
+    them. The last pair's line break is ``""`` when the text does not end with one.
+    """
+    parts = _LINE_BREAK.split(text)
+    out = [(parts[i], parts[i + 1]) for i in range(0, len(parts) - 1, 2)]
+    if parts[-1]:
+        out.append((parts[-1], ""))
+    return out
+
+
+def parse_swc_data_line(content: str) -> tuple[int, int, float, float, float, float, int] | None:
+    """The seven fields of one SWC node line, or ``None`` for any other line.
+
+    A node line has at least seven whitespace-separated fields that all parse
+    as numbers (id, type and parent as whole numbers written as integers or
+    floats); comment lines, blank lines, short lines and lines with a field
+    that does not parse are not node lines. Fields after the seventh are
+    ignored. This is the rule the labeler's parser and auto-labeling's row
+    parse use, so the node lines found here are the nodes that get labeled.
+    """
+    s = strip_line_bom(content).strip()
+    if not s or s.startswith("#"):
+        return None
+    parts = s.split()
+    if len(parts) < 7:
+        return None
+    try:
+        return (int(float(parts[0])), int(float(parts[1])), float(parts[2]), float(parts[3]),
+                float(parts[4]), float(parts[5]), int(float(parts[6])))
+    except (ValueError, OverflowError):
+        return None
+
+
+def swc_data_rows_from_text(text: str) -> tuple[list[str], list[dict]]:
+    """``(comment_lines, rows)`` of an SWC text, node lines in file order.
+
+    Each row is a dict with ``id``, ``type``, ``x``, ``y``, ``z``, ``radius``
+    and ``parent``; see :func:`parse_swc_data_line` for which lines count.
+    """
+    headers: list[str] = []
+    rows: list[dict] = []
+    for content, _brk in split_swc_lines(text):
+        stripped = strip_line_bom(content).strip()
+        if stripped.startswith("#"):
+            headers.append(strip_line_bom(content))
+            continue
+        fields = parse_swc_data_line(content)
+        if fields is None:
+            continue
+        rid, rtype, x, y, z, radius, parent = fields
+        rows.append({"id": rid, "type": rtype, "x": x, "y": y, "z": z, "radius": radius, "parent": parent})
+    return headers, rows
+
+
+def _same_number(token: str, value: float) -> bool:
+    try:
+        old = float(token)
+    except (ValueError, OverflowError):
+        return False
+    new = float(value)
+    return old == new or (math.isnan(old) and math.isnan(new))
+
+
+def _radius_token(value: float | str) -> str:
+    if isinstance(value, str):
+        return value
+    return repr(float(value))
+
+
+def rewrite_swc_fields(
+    text: str,
+    types: Mapping[int, int],
+    radii: Mapping[int, float | str] | None = None,
+) -> str:
+    """``text`` with only the type (and radius) field of the given nodes rewritten.
+
+    ``types`` maps a node id to its new type; ``radii``, when given, maps a
+    node id to its new radius (a number, or the exact text to write). Every
+    other byte is kept: line endings, a byte order mark, comment lines where
+    they stand, text after a ``#`` on a node line, fields after the seventh,
+    and the spacing between fields. A field whose value does not change keeps
+    its text (``3.0`` stays ``3.0`` when the new type is 3). Lines that are not
+    node lines (:func:`parse_swc_data_line`) are copied unchanged.
+
+    Raises ``ValueError`` when a node id appears on more than one node line, or
+    when an id in ``types`` or ``radii`` has no node line, so a label is never
+    written to the wrong line.
+    """
+    radii = dict(radii or {})
+    wanted = set(types) | set(radii)
+    seen: set[int] = set()
+    out: list[str] = []
+    for content, brk in split_swc_lines(text):
+        fields = parse_swc_data_line(content)
+        if fields is None:
+            out.append(content + brk)
+            continue
+        node_id = fields[0]
+        if node_id in seen:
+            raise ValueError(f"node id {node_id} appears on more than one line")
+        seen.add(node_id)
+        if node_id not in wanted:
+            out.append(content + brk)
+            continue
+        bom = BOM if content.startswith(BOM) else ""
+        body = content[len(bom):]
+        match = _FIELDS_TO_RADIUS.match(body)
+        if match is None:  # pragma: no cover - a node line always has these fields
+            raise ValueError(f"cannot locate the fields of node {node_id}")
+        lead, type_tok, mid, radius_tok = match.groups()
+        if node_id in types and int(types[node_id]) != fields[1]:
+            type_tok = str(int(types[node_id]))
+        if node_id in radii and not _same_number(radius_tok, float(radii[node_id])):
+            radius_tok = _radius_token(radii[node_id])
+        out.append(bom + lead + type_tok + mid + radius_tok + body[match.end():] + brk)
+    missing = wanted - seen
+    if missing:
+        raise ValueError("no node line for node id(s) " + ", ".join(str(i) for i in sorted(missing)[:10]))
+    return "".join(out)
+
+
+def decode_swc_bytes(data: bytes) -> str:
+    """SWC bytes as text, every byte kept: invalid UTF-8 is carried through as
+    surrogate escapes, so :func:`encode_swc_text` gives the same bytes back."""
+    return data.decode("utf-8", errors="surrogateescape")
+
+
+def encode_swc_text(text: str) -> bytes:
+    """The inverse of :func:`decode_swc_bytes`."""
+    return text.encode("utf-8", errors="surrogateescape")
 
 
 def is_swc_data_file(path: str | os.PathLike, extensions: Iterable[str] = (".swc",)) -> bool:
@@ -45,6 +204,8 @@ def parse_swc_text_preserve_tokens(text: str) -> pd.DataFrame:
     rows = []
     header_lines: list[str] = []
     for raw in text.splitlines():
+        # A byte order mark is not data (see ``strip_line_bom``).
+        raw = strip_line_bom(raw)
         s = raw.strip()
         if s.startswith("#"):
             header_lines.append(raw.rstrip("\r\n"))
