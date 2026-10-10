@@ -76,6 +76,13 @@ def _is_valid_radius(v: float) -> bool:
     return isinstance(v, (int, float, np.floating)) and math.isfinite(float(v)) and float(v) > 0.0
 
 
+def _same_radius(old: float, new: float, tol: float) -> bool:
+    # NaN != NaN and inf - inf is NaN, so compare those before subtracting.
+    if math.isnan(old) and math.isnan(new):
+        return True
+    return old == new or abs(old - new) <= tol
+
+
 def _clamp(v: float, lo: float, hi: float) -> float:
     if hi < lo:
         lo, hi = hi, lo
@@ -773,7 +780,7 @@ def _clean_radii_single_pass(
     for i in range(len(radii)):
         old_r = float(original[i])
         new_r = float(radii[i])
-        if abs(old_r - new_r) <= 1e-12:
+        if _same_radius(old_r, new_r, 1e-12):
             continue
         change_details.append(
             {
@@ -860,7 +867,7 @@ def clean_radii_dataframe(df: pd.DataFrame, *, rules: dict[str, Any] | None = No
     for node_id in sorted(set(old_lookup).intersection(new_lookup)):
         old_radius = float(old_lookup[node_id])
         new_radius = float(new_lookup[node_id])
-        if abs(old_radius - new_radius) <= max(1e-12, min_effective_delta):
+        if _same_radius(old_radius, new_radius, max(1e-12, min_effective_delta)):
             continue
         change_details.append(
             {

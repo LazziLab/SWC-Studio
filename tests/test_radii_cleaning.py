@@ -127,9 +127,7 @@ class RadiiCleaningTests(unittest.TestCase):
         self.assertNotIn(2, [d["node_id"] for d in out["change_details"]])
         self._assert_topology_unchanged(before, after)
 
-    # Bug: NaN != NaN, so an untouched NaN soma radius is listed as a change with
-    # no reason (radii_cleaning.py:863, same pattern at :776).
-    @unittest.expectedFailure
+    # NaN != NaN: an untouched NaN soma radius must not be listed as a change.
     def test_untouched_nan_soma_radius_is_not_reported_as_change(self) -> None:
         rows = ["1 1 0 0 0 5 -1", "2 1 1 0 0 nan 1"]
         rows += [f"{k} 3 {k} 0 0 1.0 {k - 1}" for k in range(3, 23)]
