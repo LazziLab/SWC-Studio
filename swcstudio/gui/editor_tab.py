@@ -342,6 +342,8 @@ class EditorTab(QWidget):
         s = (status or "").lower()
         if s == "pass":
             return "PASS", "#2ca02c"
+        if s == "info":
+            return "INFO", "#1f77b4"
         if s == "warning":
             return "WARN", "#ff9900"
         return "FAIL", "#d62728"

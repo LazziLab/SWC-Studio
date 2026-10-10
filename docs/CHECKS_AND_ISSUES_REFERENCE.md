@@ -270,9 +270,11 @@ Current conversion rules:
 
 - validation `pass`
   - no issue
-- validation `warning`
+- validation `info` (a failing check whose severity is `info`)
+  - `info` issue
+- validation `warning` (a failing check whose severity is `warning`)
   - `warning` issue
-- validation `fail`
+- validation `fail` (a failing check whose severity is `error`)
   - `critical` issue
 - blocked or dependency-failed checks
   - collapsed into grouped blocked-check issues

@@ -418,6 +418,8 @@ def run_validation_text(
                 result.status = "pass"
             elif item.severity.lower() == "warning":
                 result.status = "warning"
+            elif item.severity.lower() == "info":
+                result.status = "info"
             else:
                 result.status = "fail"
             result.label = display_label_for_result(item.key, bool(result.passed), item.label)

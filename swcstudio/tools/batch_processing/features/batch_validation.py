@@ -61,7 +61,7 @@ def validate_folder(folder: str, *, config_overrides: dict | None = None) -> dic
     rows: list[dict[str, Any]] = []
     failures = []
     precheck: list[dict[str, Any]] = []
-    agg = {"total": 0, "pass": 0, "warning": 0, "fail": 0}
+    agg = {"total": 0, "pass": 0, "info": 0, "warning": 0, "fail": 0}
 
     for fp in swc_files:
         try:
@@ -72,6 +72,7 @@ def validate_folder(folder: str, *, config_overrides: dict | None = None) -> dic
             summary = dict(report.get("summary", {}))
             agg["total"] += int(summary.get("total", 0))
             agg["pass"] += int(summary.get("pass", 0))
+            agg["info"] += int(summary.get("info", 0))
             agg["warning"] += int(summary.get("warning", 0))
             agg["fail"] += int(summary.get("fail", 0))
             rows.append({"file": fp.name, "report": report})

@@ -243,6 +243,8 @@ def _status_tag(status: str) -> str:
     s = str(status or "").lower()
     if s == "pass":
         return "PASS"
+    if s == "info":
+        return "INFO"
     if s == "warning":
         return "WARN"
     return "FAIL"
@@ -256,6 +258,7 @@ def _print_validation_results(report: dict) -> None:
     print(
         f"total={summary.get('total', 0)} "
         f"pass={summary.get('pass', 0)} "
+        f"info={summary.get('info', 0)} "
         f"warning={summary.get('warning', 0)} "
         f"fail={summary.get('fail', 0)}"
     )
@@ -269,7 +272,7 @@ def _print_validation_results(report: dict) -> None:
     details = [
         r
         for r in report.get("results", [])
-        if r.get("status") in {"warning", "fail"}
+        if r.get("status") in {"info", "warning", "fail"}
     ]
     if details:
         print("")
@@ -369,6 +372,7 @@ def _print_batch_validation_results(batch_report: dict) -> None:
     print(
         f"checks_total={totals.get('total', 0)} "
         f"pass={totals.get('pass', 0)} "
+        f"info={totals.get('info', 0)} "
         f"warning={totals.get('warning', 0)} "
         f"fail={totals.get('fail', 0)}"
     )
