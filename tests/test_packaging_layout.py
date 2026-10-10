@@ -113,6 +113,19 @@ class PackagingLayoutTests(unittest.TestCase):
             )
             self.assertEqual(bootstrap._code_version(bundled), (0, 2, 1))
 
+    def test_package_version_comes_from_the_loaded_code_layer(self) -> None:
+        import swcstudio
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = Path(tmp) / "app"
+            (app / "swcstudio").mkdir(parents=True)
+            (app / "VERSION").write_text("9.9.9\n", encoding="utf-8")
+            package_dir = str(app / "swcstudio")
+            with mock.patch.dict(os.environ, {"SWCSTUDIO_BUNDLE_FLAVOR": "modular"}):
+                self.assertEqual(swcstudio._code_layer_version(package_dir), "9.9.9")
+            with mock.patch.dict(os.environ, {"SWCSTUDIO_BUNDLE_FLAVOR": ""}):
+                self.assertIsNone(swcstudio._code_layer_version(package_dir))
+
     def test_current_app_version_ignores_older_code_update(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             override = Path(tmp)

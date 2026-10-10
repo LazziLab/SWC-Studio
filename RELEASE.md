@@ -115,7 +115,7 @@ be attached to the GitHub Release.
 Use `workflow_dispatch` to test without tagging:
 
 1. Go to Actions -> Release -> Run workflow
-2. Set `version` to e.g. `0.2.0-test`
+2. Set `version` to a valid PEP 440 pre-release, e.g. `0.3.0rc1` (`0.2.0-test` is rejected by the build)
 3. Set `dry_run` to `true`
 
 The workflow builds all the artifacts but skips upload to GitHub

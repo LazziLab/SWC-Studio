@@ -37,8 +37,23 @@ def _source_tree_version() -> str:
     return match.group(1) if match else "0+unknown"
 
 
+def _code_layer_version(package_dir: str | None = None) -> str | None:
+    # The desktop app loads this package from a replaceable code layer with
+    # a VERSION file beside it (packaging/swcstudio_bootstrap.py). The
+    # installed metadata there belongs to the runtime and goes stale after
+    # a code-only update, so the layer's own VERSION wins.
+    if _os.environ.get("SWCSTUDIO_BUNDLE_FLAVOR") != "modular":
+        return None
+    package_dir = package_dir or _os.path.dirname(__file__)
+    try:
+        with open(_os.path.join(_os.path.dirname(package_dir), "VERSION"), encoding="utf-8") as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
+
+
 try:
-    __version__ = _pkg_version("swcstudio")
+    __version__ = _code_layer_version() or _pkg_version("swcstudio")
 except PackageNotFoundError:
     __version__ = _source_tree_version()
 

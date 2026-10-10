@@ -30,6 +30,10 @@ if ($PythonExe -eq "py") {
 } else {
     & $PythonExe -m PyInstaller --noconfirm --clean $SpecPath
 }
+# A failed build would otherwise go on to stage and zip an older dist\ folder.
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller failed with exit code $LASTEXITCODE"
+}
 
 if (Test-Path $ZipPath) {
     Remove-Item -LiteralPath $ZipPath -Force

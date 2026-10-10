@@ -73,6 +73,13 @@ dev = [
   "build>=1.2"
 ]
 
+[project.urls]
+Homepage = "https://github.com/Mio0v0/SWC-Studio"
+Documentation = "https://mio0v0.github.io/SWC-Studio/"
+Source = "https://github.com/Mio0v0/SWC-Studio"
+Issues = "https://github.com/Mio0v0/SWC-Studio/issues"
+Changelog = "https://github.com/Mio0v0/SWC-Studio/blob/main/CHANGELOG.md"
+
 [project.scripts]
 swcstudio = "swcstudio.cli.cli:main"
 swcstudio-gui = "swcstudio.gui.main:main"

@@ -62,6 +62,14 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
+      # A tag must point at a commit already bumped to its version
+      # (pyproject.toml, updater.py, CITATION.cff); see RELEASE.md step 1.
+      # Manual dry runs take any version, so they skip this.
+      - name: Check the committed version matches the tag
+        if: github.event_name == 'push'
+        run: |
+          python scripts/stamp_version.py --version "${{ steps.version.outputs.version_no_v }}" --check
+
       - name: Stamp version into source tree (build-only, not committed)
         run: |
           python scripts/stamp_version.py --version "${{ steps.version.outputs.version_no_v }}"
