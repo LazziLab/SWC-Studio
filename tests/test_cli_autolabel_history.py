@@ -207,7 +207,12 @@ class CLIAutoLabelHistoryTests(unittest.TestCase):
                 )
 
             self.assertIsNone(result1.out_dir)
-            self.assertIsNone(result1.log_path)
+            # Every batch writes one report beside the files it edited in place.
+            report = Path(result1.log_path)
+            self.assertEqual(report.parent, folder)
+            report_text = report.read_text(encoding="utf-8")
+            self.assertIn("first.swc", report_text)
+            self.assertIn("second.swc", report_text)
             self.assertEqual(
                 {row["file"]: row["operation_id"] for row in result1.commits},
                 {"first.swc": "op-1", "second.swc": "op-1"},
