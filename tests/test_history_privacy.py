@@ -66,7 +66,9 @@ class CrateExportPrivacyTests(unittest.TestCase):
         crate = self._export(with_pii=False)
 
         self.assertEqual(self._files_mentioning(crate, ["Jane", "jdoe2"]), set())
-        with sqlite3.connect(crate / "history" / "index.sqlite") as conn:
+        # closing(): the connection's own context manager only commits, and
+        # an open handle stops the temp folder being removed on Windows.
+        with contextlib.closing(sqlite3.connect(crate / "history" / "index.sqlite")) as conn:
             users = sorted(row[0] for row in conn.execute("SELECT os_user FROM commits"))
         self.assertEqual(users, ["agent-1", "agent-2"])
         header = (crate / "data" / "cell.swc").read_text(encoding="utf-8")

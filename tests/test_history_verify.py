@@ -78,6 +78,39 @@ class HistoryVerifyTests(unittest.TestCase):
         ObjectStore(self.hist / "objects").remove(diff_ref.removeprefix("sha256:"))
         self.assertTrue(any("is referenced but missing" in p for p in self._problems()))
 
+    def test_rewritten_index_cache_is_not_a_problem(self) -> None:
+        # Reading the history (the History Browser, for one) rewrites the
+        # SQLite index, so it cannot be held to the archived checksum.
+        with open(self.hist / "index.sqlite", "ab") as fh:
+            fh.write(b"\0")
+        self.assertEqual(self._problems(), [])
+
+    def test_damaged_ai_run_blob_does_not_stop_the_check(self) -> None:
+        swc = self.tmp / "ai.swc"
+        swc.write_bytes(BASE_SWC)
+        with tracked_op(swc, kind=OpKind.AUTO_LABEL, params={"model_sha": "x"}, message="ai") as op:
+            op.set_output(TYPE_EDIT)
+        hist = self.tmp / "ai_history"
+        with open_history_for_read(swc, history_dir_for(swc)) as live:
+            shutil.copytree(live, hist)
+        event = json.loads((hist / "events.jsonl").read_bytes().splitlines()[-1])
+        ai_ref = next(o["ai_run_ref"] for o in event["ops"] if o.get("ai_run_ref"))
+        blob = ObjectStore(hist / "objects")._path_for(ai_ref.removeprefix("sha256:"))
+        blob.write_bytes(b"not zstd at all")
+
+        problems = _history_problems(hist, ObjectStore(hist / "objects"))
+        self.assertIsInstance(problems, list)
+
+    def test_numeric_parameter_keys_still_verify(self) -> None:
+        swc = self.tmp / "keys.swc"
+        swc.write_bytes(BASE_SWC)
+        with tracked_op(swc, kind=OpKind.SET_TYPE, params={"counts": {2: 1, 10: 3}}, message="keys") as op:
+            op.set_output(TYPE_EDIT)
+        hist = self.tmp / "keys_history"
+        with open_history_for_read(swc, history_dir_for(swc)) as live:
+            shutil.copytree(live, hist)
+        self.assertEqual(_history_problems(hist, ObjectStore(hist / "objects")), [])
+
     def test_file_changed_after_archiving_is_detected(self) -> None:
         with open(self.events, "ab") as fh:
             fh.write(b"\n")

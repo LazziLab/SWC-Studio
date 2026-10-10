@@ -171,9 +171,9 @@ def add_history_subparser(sub: argparse._SubParsersAction) -> None:
     ec = hsub.add_parser("export-crate", help="Bundle file + history as RO-Crate")
     ec.add_argument("file", type=Path)
     ec.add_argument("-o", "--output", type=Path, required=True,
-                    help="Output directory for the crate")
+                    help="New or empty output directory for the crate")
     ec.add_argument("--with-pii", action="store_true",
-                    help="Include hostnames/usernames/paths (default: stripped)")
+                    help="Keep OS usernames (default: replaced by pseudonyms agent-1, agent-2, ...)")
 
     # init (utility — implicit on first tracked_op, but useful for migration)
     init_p = hsub.add_parser("init", help="Initialize the history archive and migrate any legacy output")
@@ -637,7 +637,14 @@ def _history_problems(hist: Path, store: ObjectStore) -> list[str]:
     - every branch and tag points to a commit in the log;
     - every blob a branch or tag can reach is present (``gc`` may have
       removed the rest, so unreachable commits are not checked);
-    - the files listed in ``checksums.json`` still match it.
+    - the files listed in ``checksums.json`` still match it, except the
+      SQLite index: it is a cache rebuilt from the log, and reading the
+      history (the History Browser, for one) rewrites it.
+
+    These catch corruption and accidental damage. They are not proof
+    against deliberate edits: the archive password ships with the app,
+    ``checksums.json`` can be recomputed, and commit ids do not hash
+    descriptive fields such as the message, time and actor.
     """
     from swcstudio.core.provenance.canonical import sha256_hex
     from swcstudio.core.provenance.events import MAX_SUPPORTED_SCHEMA_VERSION, compute_event_id
@@ -668,13 +675,20 @@ def _history_problems(hist: Path, store: ObjectStore) -> list[str]:
         if sha and sha not in commits:
             problems.append(f"{label} points to {sha}, which is not in the log")
 
-    for sha in sorted(_reachable_blobs(hist)):
+    try:
+        reachable = _reachable_blobs(hist)
+    except Exception as exc:  # noqa: BLE001 - report it with the other problems
+        problems.append(f"could not walk the commit graph: {exc}")
+        reachable = set()
+    for sha in sorted(reachable):
         if not store.exists(sha):
             problems.append(f"blob {sha} is referenced but missing")
 
     checksums_path = hist / "checksums.json"
     if checksums_path.exists():
         for rel, digest in sorted(json.loads(checksums_path.read_bytes()).items()):
+            if rel == "index.sqlite":
+                continue
             target = hist / rel
             if not target.is_file():
                 problems.append(f"{rel} is listed in checksums.json but missing")
@@ -704,12 +718,10 @@ def _cmd_gc(args) -> int:
 
 
 def _cmd_export_crate(args) -> int:
-    with _history_store(args.file, write=True):
-        # Crate writer lives in slice 13 (provenance.crate). For the v1 CLI
-        # we surface the verb so it's discoverable; the implementation lives
-        # in the dedicated module.
+    # Read-only: exporting must not repack the file's history archive.
+    with _history_store(args.file) as hist:
         from swcstudio.core.provenance.crate import export_crate
-        out = export_crate(args.file, args.output, with_pii=args.with_pii)
+        out = export_crate(args.file, args.output, with_pii=args.with_pii, history_dir=hist)
     print(f"wrote crate -> {out}")
     return 0
 
@@ -1067,7 +1079,7 @@ def _reachable_blobs(hist: Path) -> set[str]:
                         ref = (art.get("sha256") or "")
                         if ref:
                             reachable.add(ref.removeprefix("sha256:"))
-                except (BlobNotFoundError, ValueError):
+                except Exception:  # noqa: BLE001 - a damaged blob is verify's to report, not to crash on
                     pass
         if ev.parent:
             stack.append(ev.parent)
@@ -1090,6 +1102,11 @@ def _format_reproduce_yaml(ev, ai_blob: dict, source_path: Path) -> str:
     ]
     if artifacts.get("model.pkl"):
         lines.append(f"model:     {{sha256: {artifacts['model.pkl']}}}")
+    elif params.get("model_sha"):
+        # The model set's fingerprint: rerunning with a different set of
+        # models gives different labels, wherever the folder is.
+        lines.append(f"model:     {{version: {params.get('model_version') or 'null'}, "
+                     f"sha256: {params['model_sha']}}}")
     lines.append(f"env_hash:  {ai_blob.get('env_hash', 'null')}")
     # Only the recorded settings that are command-line options; the rest of
     # ``params`` describes the result. The GUI records its settings under
@@ -1102,7 +1119,9 @@ def _format_reproduce_yaml(ev, ai_blob: dict, source_path: Path) -> str:
         arg_pieces.append("--cell-class " + {"pyramidal": "3-class", "interneuron": "2-class"}.get(cell, cell))
     if settings.get("flag_enabled") is False:
         arg_pieces.append("--no-flag")
-    if settings.get("model_dir"):
+    # Models found by the default search (shipped or updated in the app)
+    # are found again without the option; a chosen folder needs it.
+    if settings.get("model_dir") and params.get("model_source") not in ("bundled", "user"):
         arg_pieces.append(f"--model-dir {settings['model_dir']}")
     arg_pieces.append(source_path.name)
     lines.append(f"command:   {' '.join(arg_pieces)!r}")

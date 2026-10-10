@@ -242,8 +242,9 @@ SQLite query index. SWC headers carry a bounded `# @PROV` pointer to
 that archive and its repo ID, so renamed files can be reattached to
 their history. The archive's default password ships with the app: it
 discourages hand edits but does not make the history private (set
-`SWCSTUDIO_HISTORY_PASSWORD` for that). Tampering is caught by the
-SHA-256 hashes instead, which `swcstudio history verify` re-checks. User-facing operations are numbered independently for
+`SWCSTUDIO_HISTORY_PASSWORD` for that). `swcstudio history verify`
+re-checks the SHA-256 hashes, which catches corruption and accidental
+damage, though not deliberate edits by someone who recomputes them. User-facing operations are numbered independently for
 each file as `op-1`, `op-2`, and so on, including files handled by a
 batch. AI ops capture an MLflow-shaped run record plus a full
 environment fingerprint for reproducibility. CLI: `swcstudio history

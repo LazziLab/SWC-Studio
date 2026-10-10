@@ -29,8 +29,10 @@ metadata, the copied ``events.jsonl``, the copied ``index.sqlite`` and
 the ``@PROV`` header of the copied SWC. ``history/checksums.json`` is
 recomputed to match. Commit ids do not cover the actor (spec §4), so
 the scrubbed log still verifies. The blobs are copied as-is: they hold
-no usernames, hostnames or absolute paths (env capture in
-:mod:`provenance.env` deliberately omits hostname/username).
+no usernames or hostnames (env capture in :mod:`provenance.env`
+deliberately omits them). The one path operations record is a model
+folder, with the home directory written as ``~``; it is part of the
+operation parameters that commit ids hash, so the export keeps it.
 """
 
 from __future__ import annotations
@@ -59,17 +61,24 @@ def export_crate(
     out_dir: str | Path,
     *,
     with_pii: bool = False,
+    history_dir: str | Path | None = None,
 ) -> Path:
     """Bundle an SWC + history into an RO-Crate directory at ``out_dir``.
 
-    Returns the crate root path. Overwrites ``out_dir`` if it exists
-    (caller is expected to choose a fresh path).
+    ``history_dir`` is a readable history folder for ``swc_path`` (e.g.
+    from ``open_history_for_read``); it defaults to the working folder.
+
+    Returns the crate root path. ``out_dir`` must be new or empty: an
+    existing folder with anything in it is refused rather than cleared,
+    since it may be the SWC's own folder or hold unrelated files.
     """
     src = Path(swc_path)
     out = Path(out_dir)
-    if out.exists():
-        shutil.rmtree(out)
-    out.mkdir(parents=True)
+    if out.exists() and (not out.is_dir() or any(out.iterdir())):
+        raise FileExistsError(
+            f"{out} already exists and is not an empty folder; choose a new or empty folder for the crate."
+        )
+    out.mkdir(parents=True, exist_ok=True)
 
     # Copy the dataset.
     data_dir = out / "data"
@@ -79,7 +88,7 @@ def export_crate(
 
     # Copy history (events.jsonl, objects/, refs/, version, root.json,
     # index.sqlite — but NOT lock or SQLite -wal/-shm side files).
-    hist = history_dir_for(src)
+    hist = Path(history_dir) if history_dir is not None else history_dir_for(src)
     hist_out = out / "history"
     hist_out.mkdir()
     if hist.exists():

@@ -569,7 +569,7 @@ swcstudio history init <file>
 | `checkpoint` | Materialize a past operation/state as a labeled `.swc` next to the source SWC. |
 | `reproduce` | Emit a `reproduce.yaml` so a colleague can recompute an AI result. |
 | `reindex` | Rebuild `index.sqlite` from `events.jsonl`. |
-| `verify` | Hash-check every blob; recompute every commit id and check that its parent is an earlier commit; check that branches and tags point into the log, that every blob they reach is present, and that the files match `checksums.json`. Exits non-zero on any problem. |
+| `verify` | Hash-check every blob; recompute every commit id and check that its parent is an earlier commit; check that branches and tags point into the log, that every blob they reach is present, and that the files match `checksums.json` (except `index.sqlite`, a cache that reading the history rewrites). Exits non-zero on any problem. This catches corruption and accidental damage, not deliberate edits: the archive password is public, `checksums.json` can be recomputed, and commit ids do not hash descriptive fields such as the message, time and actor. |
 | `gc` | Remove unreferenced blobs from `objects/`. |
 | `export-crate` | Bundle file + history + AI metadata as an RO-Crate directory. |
 | `init` | Initialize history explicitly and migrate a legacy output sidecar when present. |
@@ -706,8 +706,11 @@ equivalent) instead.
 
 ## 20. Privacy and export
 
-`swcstudio history export-crate` produces an
-[RO-Crate](https://www.researchobject.org/ro-crate/) directory:
+`swcstudio history export-crate <file> -o <dir>` produces an
+[RO-Crate](https://www.researchobject.org/ro-crate/) directory. `<dir>`
+must be new or empty; an existing folder with files in it is refused,
+never cleared. The export reads the history without rewriting its
+archive.
 
 ```
 <crate>/
@@ -727,12 +730,15 @@ not hash the actor (§4), so the exported log still verifies.
 `--with-pii` keeps the real usernames.
 
 Hostnames are never recorded. The one filesystem path the history can
-hold is a model folder chosen with `--model-dir`. It is stored with the
-home directory written as `~` (model lookup expands it again), so a
-folder under the home directory does not reveal the username. The path
-is part of the operation's parameters, which the commit id hashes, so
-the export cannot rewrite it; a folder outside the home directory is
-exported as given.
+hold is the model folder an auto-label run used, recorded from the GUI,
+the command line and batches alike, with the home directory written as
+`~` (model lookup expands it again), so a folder under the home
+directory does not reveal the username. Next to it the run records
+where the folder came from (`model_source`), the labeler version and a
+SHA-256 fingerprint of the model files (`model_sha`), which identify the
+models wherever they are installed. The path is part of the operation's
+parameters, which the commit id hashes, so the export cannot rewrite
+it; a folder outside the home directory is exported as given.
 
 ---
 
