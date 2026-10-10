@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version as pkg_version
@@ -19,7 +20,10 @@ copyright = f"{datetime.now():%Y}, {author}"
 try:
     release = pkg_version("swcstudio")
 except PackageNotFoundError:
-    release = "0.2.0"
+    # Not installed: read the version from pyproject.toml, its one source.
+    with open(os.path.join(PROJECT_ROOT, "pyproject.toml"), encoding="utf-8") as fh:
+        _match = re.search(r'^version\s*=\s*"([^"]+)"', fh.read(), re.MULTILINE)
+    release = _match.group(1) if _match else "0+unknown"
 
 # Sphinx expects both version (short) and release (full).
 version = release

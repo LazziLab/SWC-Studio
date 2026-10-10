@@ -22,10 +22,24 @@ if _sys.platform == "darwin":
 
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
+
+def _source_tree_version() -> str:
+    # Local source checkout before installation: pyproject.toml is the one
+    # place the version is set, so read it rather than repeat it here.
+    import re as _re
+
+    pyproject = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "pyproject.toml")
+    try:
+        with open(pyproject, encoding="utf-8") as fh:
+            match = _re.search(r'^version\s*=\s*"([^"]+)"', fh.read(), _re.MULTILINE)
+    except OSError:
+        match = None
+    return match.group(1) if match else "0+unknown"
+
+
 try:
     __version__ = _pkg_version("swcstudio")
 except PackageNotFoundError:
-    # Local source checkout before installation.
-    __version__ = "0.1.0"
+    __version__ = _source_tree_version()
 
 __all__ = ["api", "core", "tools", "plugins", "cli", "gui", "__version__"]

@@ -47,7 +47,7 @@ Three supported install paths, depending on what you need.
 Use this path if you only need the desktop application and don't want to deal with Python.
 
 1. Open <https://github.com/Mio0v0/SWC-Studio/releases/latest>
-2. Download `SWC-Studio-v0.2.0-macOS.zip` or `SWC-Studio-v0.2.0-Windows.zip`
+2. Download `SWC-Studio-vX.Y.Z-macOS.zip` or `SWC-Studio-vX.Y.Z-Windows.zip` (X.Y.Z is the latest version)
 3. Extract and launch:
    - **macOS** — drag `SWC-Studio.app` into `/Applications`, then double-click. First launch needs `xattr -cr /Applications/SWC-Studio.app` or right-click → Open (the bundle is not yet code-signed).
    - **Windows** — extract anywhere and run the `.exe` inside.
