@@ -252,6 +252,32 @@ class SplitTests(unittest.TestCase):
         rows = [(1, 3, 0, 0, 0, 1, -1), (2, 3, 6, 0, 0, 1, 1)]
         self.assertEqual(split_swc_text(_swc(rows)), [])
 
+    def test_duplicate_node_ids_are_refused(self) -> None:
+        rows = list(MULTI_CELL) + [(5, 3, 107, 1, 0, 1, 4)]
+        with self.assertRaisesRegex(ValueError, "node ID 5"):
+            split_swc_text(_swc(rows))
+
+    def test_parent_cycle_is_refused_instead_of_dropped(self) -> None:
+        # Nodes 11 and 12 point at each other and reach no soma.
+        rows = list(MULTI_CELL) + [(11, 3, 50, 0, 0, 1, 12), (12, 3, 51, 0, 0, 1, 11)]
+        with self.assertRaises(ValueError):
+            split_swc_text(_swc(rows))
+
+    def test_batch_split_reports_refused_file_and_writes_nothing_for_it(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from swcstudio.tools.batch_processing.features.swc_splitter import split_folder
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / "good.swc").write_text(_swc(MULTI_CELL), encoding="utf-8")
+            (folder / "bad.swc").write_text(_swc(list(MULTI_CELL) + [(5, 3, 1, 1, 0, 1, 4)]), encoding="utf-8")
+            out = split_folder(str(folder))
+            self.assertEqual(len(out["failures"]), 1)
+            self.assertIn("bad.swc", out["failures"][0])
+            self.assertFalse(any("bad" in Path(p).name for p in out.get("output_files", [])))
+
 
 if __name__ == "__main__":
     unittest.main()

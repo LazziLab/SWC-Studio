@@ -22,7 +22,8 @@ from swcstudio.core.reporting import (
     timestamp_slug,
     write_text_report,
 )
-from swcstudio.core.swc_io import is_swc_data_file
+from swcstudio.core.geometry_editing import require_no_parent_cycles, require_unique_node_ids
+from swcstudio.core.swc_io import is_swc_data_file, parse_swc_text_preserve_tokens
 from swcstudio.core.validation import _split_swc_by_soma_roots
 from swcstudio.plugins.registry import register_builtin_method, resolve_method
 
@@ -54,11 +55,32 @@ def get_config() -> dict[str, Any]:
     return merge_config(DEFAULT_CONFIG, loaded)
 
 
+def refuse_unsafe_split(swc_text: str) -> int:
+    """Raise ValueError for a file a split would silently corrupt.
+
+    With duplicate node IDs a parent ID could mean either row, and nodes on
+    a parent cycle reach no soma, so the split would drop them. Returns the
+    file's row count, which the trees must add up to.
+    """
+    df = parse_swc_text_preserve_tokens(swc_text)
+    require_unique_node_ids(df, "split this file")
+    require_no_parent_cycles(df, "split this file")
+    return int(len(df))
+
+
 def split_swc_text(swc_text: str, *, config_overrides: dict | None = None):
     cfg = merge_config(get_config(), config_overrides)
+    rows = refuse_unsafe_split(swc_text)
     method = str(cfg.get("method", "default"))
     fn = resolve_method(FEATURE_KEY, method)
-    return fn(swc_text, cfg)
+    trees = fn(swc_text, cfg)
+    placed = sum(int(node_count) for _root, _text, node_count in trees)
+    if len(trees) > 1 and placed != rows:
+        raise ValueError(
+            f"Cannot split this file: the trees hold {placed} of its {rows} nodes, "
+            "so the split would drop or duplicate nodes."
+        )
+    return trees
 
 
 def split_folder(folder: str, *, config_overrides: dict | None = None) -> dict[str, Any]:

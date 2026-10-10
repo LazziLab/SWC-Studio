@@ -54,7 +54,9 @@ def per_tree_validation(swc_text: str):
 
 
 def split_by_soma_roots(swc_text: str):
-    return _split_swc_by_soma_roots(swc_text)
+    from swcstudio.tools.batch_processing.features.swc_splitter import split_swc_text
+
+    return split_swc_text(swc_text)
 
 
 def run_auto_typing_folder(folder: str, options: BatchOptions | None = None) -> Any:
