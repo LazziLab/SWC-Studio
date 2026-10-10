@@ -6,13 +6,29 @@ from typing import Any
 
 
 CHECK_CATALOG: list[tuple[str, list[tuple[str, str, str]]]] = [
+    # First, so these run (and report) before the multiple-soma stop.
+    (
+        "File integrity",
+        [
+            (
+                "no_duplicate_node_ids",
+                "Node IDs are unique",
+                "Every row must have its own node ID. When an ID is on more than one row, a parent ID that names it could mean either row, so Index Clean and the geometry edits refuse the file until the duplicated rows are renumbered or removed.",
+            ),
+            (
+                "no_parent_cycles",
+                "No parent cycles",
+                "Following parent IDs from any node must end at a root (parent -1). Flags nodes on a closed chain of two or more nodes, for example A's parent is B and B's parent is A; those nodes and everything below them are cut off from the cell. A node that is its own parent is reported by No self loops.",
+            ),
+        ],
+    ),
     (
         "Structural presence",
         [
             (
                 "valid_soma_format",
                 "Soma format is simple",
-                "Warns when a soma is represented by multiple connected type-1 nodes. The other checks still run, on a temporary working copy with each soma group merged into one node.",
+                "Warns when a soma is represented by multiple connected type-1 nodes. The other checks still run, on a temporary working copy with each soma group merged into one node at the group's centroid, with the radius of the sphere of equal surface (a standard three-point soma of radius r keeps radius r).",
             ),
             (
                 "multiple_somas",
@@ -159,12 +175,12 @@ CHECK_CATALOG: list[tuple[str, list[tuple[str, str, str]]]] = [
             (
                 "parent_id_less_than_child_id",
                 "Parent ID is less than child ID",
-                "Warns when a valid parent ID is greater than or equal to its child ID, which violates the usual SWC topological ordering convention.",
+                "Warns when a valid parent ID is greater than or equal to its child ID, which violates the usual SWC topological ordering convention. Read from the file as written, before soma groups are merged.",
             ),
             (
                 "no_node_id_gaps",
                 "Node IDs are continuous",
-                "Warns when sorted node IDs skip missing integers, which usually means the file should be reindexed for a clean continuous sequence.",
+                "Warns when sorted node IDs skip missing integers, which usually means the file should be reindexed for a clean continuous sequence. Read from the file as written, so merging a complex soma does not create gaps.",
             ),
         ],
     ),
@@ -176,6 +192,8 @@ CHECK_CATEGORY: dict[str, str] = {}
 CHECK_LABEL: dict[str, str] = {}
 CHECK_RULE: dict[str, str] = {}
 CHECK_FAILURE_LABEL: dict[str, str] = {
+    "no_duplicate_node_ids": "Duplicate node IDs found",
+    "no_parent_cycles": "Parent cycles found",
     "valid_soma_format": "Complex soma format found",
     "multiple_somas": "Multiple somas found",
     "has_soma": "Soma missing",

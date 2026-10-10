@@ -6,7 +6,11 @@ from pathlib import Path
 from typing import Any
 
 from swcstudio.core.config import load_feature_config, merge_config
-from swcstudio.core.geometry_editing import reindex_dataframe_with_map
+from swcstudio.core.geometry_editing import (
+    reindex_dataframe_with_map,
+    require_no_parent_cycles,
+    require_unique_node_ids,
+)
 from swcstudio.core.reporting import (
     operation_output_path_for_file,
     operation_report_path_for_file,
@@ -50,13 +54,33 @@ def get_config() -> dict[str, Any]:
     return merge_config(DEFAULT_CONFIG, loaded)
 
 
+def refuse_unsafe_index_clean(swc_text: str) -> int:
+    """Raise ValueError when renumbering ``swc_text`` would lose or garble rows.
+
+    Duplicate node IDs would collapse into one row, and a parent cycle has no
+    parent-before-child order. Every method, built-in or plugin, is refused.
+    Returns the number of node rows.
+    """
+    df = parse_swc_text_preserve_tokens(swc_text)
+    require_unique_node_ids(df, "run Index Clean")
+    require_no_parent_cycles(df, "run Index Clean")
+    return int(len(df))
+
+
 def index_clean_text(swc_text: str, *, config_overrides: dict | None = None) -> dict[str, Any]:
     cfg = merge_config(get_config(), config_overrides)
     method = str(cfg.get("method", "default"))
+    row_count = refuse_unsafe_index_clean(swc_text)
     fn = resolve_method(FEATURE_KEY, method)
     out = fn(swc_text, cfg)
     if not isinstance(out, dict) or "dataframe" not in out or "bytes" not in out:
         raise TypeError("validation index clean method must return dict with 'dataframe' and 'bytes'")
+    # Renumbering never adds or drops nodes; refuse a result that does.
+    if int(len(out["dataframe"])) != row_count:
+        raise ValueError(
+            f"Index Clean changed the node count from {row_count} to {int(len(out['dataframe']))}; "
+            "the result was discarded."
+        )
     out["config_used"] = cfg
     return out
 

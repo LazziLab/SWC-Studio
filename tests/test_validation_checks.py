@@ -28,6 +28,8 @@ from swcstudio.tools.validation.features.run_checks import validate_file
 
 
 NATIVE_CHECK_KEYS = {
+    "no_duplicate_node_ids",
+    "no_parent_cycles",
     "valid_soma_format",
     "multiple_somas",
     "has_soma",
@@ -186,7 +188,7 @@ class _CheckTestCase(unittest.TestCase):
 
 
 class NativeCheckRegistryTests(unittest.TestCase):
-    def test_native_check_set_is_the_documented_eighteen(self) -> None:
+    def test_native_check_set_is_the_documented_twenty(self) -> None:
         register_native_checks()
         native = {spec.key for spec in list_checks() if spec.source == "native"}
         self.assertEqual(native, NATIVE_CHECK_KEYS)
@@ -424,6 +426,196 @@ class PointAndTopologyCheckTests(_CheckTestCase):
         self.assertEqual(result.metrics["missing_id_count"], 5)
 
 
+# SMALL_CELL plus a detached two-node loop: 6's parent is 7 and 7's parent is 6.
+TWO_NODE_CYCLE = list(SMALL_CELL) + ["6 3 50 0 0 1 7", "7 3 56 0 0 1 6"]
+
+
+class IdIntegrityCheckTests(_CheckTestCase):
+    def test_no_duplicate_node_ids_passes(self) -> None:
+        self._assert_pass("no_duplicate_node_ids", SMALL_CELL)
+
+    def test_no_duplicate_node_ids_reports_each_repeated_id_once(self) -> None:
+        rows = list(SMALL_CELL) + ["2 3 40 0 0 1 1", "4 3 50 0 0 1 3", "4 3 60 0 0 1 3"]
+        result = self._assert_fail("no_duplicate_node_ids", rows, expected_ids=[2, 4])
+        self.assertEqual(result.status, "fail")
+        self.assertEqual(result.metrics["duplicate_id_count"], 2)
+        self.assertEqual(result.metrics["duplicate_row_count"], 5)
+        self.assertIn("2 and 4", result.message)
+
+    def test_no_parent_cycles_passes(self) -> None:
+        self._assert_pass("no_parent_cycles", SMALL_CELL)
+
+    def test_no_parent_cycles_reports_detached_two_node_cycle(self) -> None:
+        result = self._assert_fail("no_parent_cycles", TWO_NODE_CYCLE, expected_ids=[6, 7])
+        self.assertEqual(result.status, "fail")
+        self.assertEqual(result.metrics["cycle_count"], 1)
+
+    def test_no_parent_cycles_counts_nodes_hanging_below_a_cycle(self) -> None:
+        rows = list(SMALL_CELL) + [
+            "6 3 50 0 0 1 8",
+            "7 3 56 0 0 1 6",
+            "8 3 60 0 0 1 7",
+            "9 3 70 0 0 1 8",  # below the cycle, not on it
+        ]
+        result = self._assert_fail("no_parent_cycles", rows, expected_ids=[6, 7, 8])
+        self.assertEqual(result.metrics["cut_off_node_count"], 4)
+
+    def test_no_parent_cycles_leaves_self_loops_to_no_self_loop(self) -> None:
+        rows = list(SMALL_CELL)
+        rows[3] = "4 3 12 0 0 0.8 4"
+        self._assert_pass("no_parent_cycles", rows)
+
+    def test_no_parent_cycles_handles_duplicate_ids(self) -> None:
+        # ID 7 has two rows with different parents; the 6-7 loop still counts.
+        rows = TWO_NODE_CYCLE + ["7 3 80 0 0 1 1"]
+        self._assert_fail("no_parent_cycles", rows, expected_ids=[6, 7])
+
+
+# A three-point soma (1, 2, 3) and contiguous IDs 1..9. Validation merges the
+# soma into node 1 on its working copy, which deletes IDs 2 and 3.
+THREE_POINT_SOMA_CELL = [
+    "1 1 0 0 0 2 -1",
+    "2 1 0 2 0 2 1",
+    "3 1 0 -2 0 2 1",
+    "4 3 10 0 0 1 1",
+    "5 3 16 0 0 0.9 4",
+    "6 3 22 1 0 0.8 5",
+    "7 2 -6 0 0 0.5 1",
+    "8 2 -12 0 0 0.4 7",
+    "9 2 -18 1 0 0.3 8",
+]
+
+
+class OriginalFileCheckTests(_CheckTestCase):
+    """Checks about the file's own IDs read the rows as written."""
+
+    def test_no_node_id_gaps_ignores_merged_soma_points(self) -> None:
+        self._assert_pass("no_node_id_gaps", THREE_POINT_SOMA_CELL)
+
+    def test_parent_id_order_reads_the_file_not_the_merged_soma(self) -> None:
+        # Soma 4 is the root and soma 1 hangs off it (4 >= 1: a real order
+        # violation). Node 2's parent is 1 (fine). Merging the soma into
+        # node 4 would hide node 1 and make node 2's parent 4.
+        rows = [
+            "4 1 0 0 0 2 -1",
+            "1 1 2 0 0 2 4",
+            "2 3 10 0 0 1 1",
+            "3 3 16 0 0 1 2",
+        ]
+        self._assert_fail("parent_id_less_than_child_id", rows, expected_ids=[1])
+
+    def test_no_self_loop_reports_a_soma_that_is_its_own_parent(self) -> None:
+        # Merging makes every soma a root, which would hide this.
+        rows = list(SMALL_CELL)
+        rows[0] = "1 1 0 0 0 5 1"
+        self._assert_fail("no_self_loop", rows, expected_ids=[1])
+
+    def test_working_copy_still_merges_the_soma(self) -> None:
+        ctx = ValidationContext(_swc(THREE_POINT_SOMA_CELL))
+        self.assertEqual(sorted(int(v) for v in ctx.ids), [1, 4, 5, 6, 7, 8, 9])
+        self.assertEqual(sorted(int(v) for v in ctx.original_ids), list(range(1, 10)))
+
+
+# The basal neurite's first node (2) branches at once, so NeuroM's root
+# section holds one point and NeuroM 4.0.5's has_no_narrow_start indexes past
+# it (real NeuroMorpho files do this).
+BRANCHES_AT_FIRST_NODE = [
+    "1 1 0 0 0 5 -1",
+    "2 3 6 0 0 1 1",
+    "3 3 10 2 0 0.8 2",
+    "4 3 14 4 0 0.6 3",
+    "5 3 10 -2 0 0.8 2",
+    "6 3 14 -4 0 0.6 5",
+    "7 2 -6 0 0 0.5 1",
+    "8 2 -10 0 0 0.4 7",
+    "9 2 -14 0 0 0.3 8",
+]
+
+
+class NarrowStartCheckTests(_CheckTestCase):
+    def test_neurite_that_branches_at_its_first_node_is_evaluated(self) -> None:
+        result = self._assert_pass("no_ultranarrow_starts", BRANCHES_AT_FIRST_NODE, params={"frac": 0.9})
+        self.assertEqual(result.status, "pass")
+
+    def test_narrow_first_node_before_a_branch_is_reported(self) -> None:
+        rows = list(BRANCHES_AT_FIRST_NODE)
+        rows[1] = "2 3 6 0 0 0.2 1"  # much thinner than the 0.8 branch starts
+        result = self._assert_fail("no_ultranarrow_starts", rows, params={"frac": 0.9})
+        self.assertIn(3, result.failing_node_ids)
+
+    def test_matches_neurom_when_the_first_section_has_two_points(self) -> None:
+        from neurom.check import morphology_checks as nm_checks
+
+        from swcstudio.core.validation_checks.neuron_morphology_checks import has_no_narrow_start
+
+        rows = _clean_neuron_rows()
+        thin = rows[1].split()
+        thin[5] = "0.1"  # first axon node, far thinner than the next
+        rows[1] = " ".join(thin)
+        for case in (_clean_neuron_rows(), rows):
+            morph = ValidationContext(_swc(case)).get_morphology()
+            ours = has_no_narrow_start(morph, frac=0.9)
+            theirs = nm_checks.has_no_narrow_start(morph, frac=0.9)
+            self.assertEqual(bool(ours), bool(theirs))
+            self.assertEqual(
+                [(sid, pts.tolist()) for sid, pts in ours.info],
+                [(sid, pts.tolist()) for sid, pts in theirs.info],
+            )
+        self.assertFalse(bool(has_no_narrow_start(ValidationContext(_swc(rows)).get_morphology())))
+
+
+class IdIntegrityIssueTests(unittest.TestCase):
+    def _issues(self, rows: list[str]) -> list[dict]:
+        from swcstudio.core.issues import build_issue_list
+        from swcstudio.core.swc_io import parse_swc_text_preserve_tokens
+
+        text = _swc(rows)
+        report = run_validation_text(text).to_dict()
+        return build_issue_list(parse_swc_text_preserve_tokens(text), report, skip_type_suspicion=True)
+
+    def test_duplicate_ids_issue_and_blocked_checks_name_the_cause(self) -> None:
+        rows = _clean_neuron_rows()
+        spike = rows[10].split()
+        spike[5] = "9.0"  # a radius outlier the radii suggestions would flag
+        rows[10] = " ".join(spike)
+        self.assertIn("radii_outlier_batch", {item["source_key"] for item in self._issues(rows)})
+        rows.append(rows[5].replace(rows[5].split()[2], "77.0", 1))
+        issues = self._issues(rows)
+        by_key = {item["source_key"]: item for item in issues}
+
+        dup = by_key["no_duplicate_node_ids"]
+        self.assertEqual(dup["severity"], "critical")
+        self.assertEqual(dup["node_ids"], [6])
+        self.assertEqual(dup["tool_target"], "validation")
+        self.assertIn("renumbering or removing the duplicated rows", dup["suggested_fix"])
+        self.assertEqual(by_key["blocked_validation_checks"]["title"], "Checks blocked by duplicate node IDs")
+        # Radii suggestions are keyed by node ID, so they wait for unique IDs.
+        self.assertNotIn("radii_outlier_batch", by_key)
+
+    def test_parent_cycle_issue_routes_to_geometry_editing(self) -> None:
+        issues = self._issues(TWO_NODE_CYCLE)
+        by_key = {item["source_key"]: item for item in issues}
+        cycle = by_key["no_parent_cycles"]
+        self.assertEqual(cycle["node_ids"], [6, 7])
+        self.assertEqual(cycle["tool_target"], "geometry_editing")
+        self.assertEqual(by_key["blocked_validation_checks"]["title"], "Checks blocked by parent cycles")
+
+
+class CatalogConsistencyTests(unittest.TestCase):
+    def test_every_check_is_registered_catalogued_and_configured(self) -> None:
+        from swcstudio.core.validation_catalog import CHECK_CATEGORY, CHECK_FAILURE_LABEL
+
+        register_native_checks()
+        register_neuron_morphology_checks()
+        registered = {
+            spec.key for spec in list_checks() if spec.source in {"native", "neuron_morphology"}
+        }
+        configured = set(load_validation_config()["checks"])
+        self.assertEqual(set(CHECK_CATEGORY), registered)
+        self.assertEqual(configured, registered)
+        self.assertEqual(set(CHECK_FAILURE_LABEL), registered)
+
+
 class FullValidationTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.TemporaryDirectory(prefix="swcstudio-validation-")
@@ -475,6 +667,61 @@ class FullValidationTests(unittest.TestCase):
 
         self.assertEqual(report.results[-1].key, "multiple_somas")
         self.assertFalse(report.results[-1].passed)
+
+    def test_complex_soma_does_not_report_id_gaps_or_order_violations(self) -> None:
+        report = run_validation_text(_swc(THREE_POINT_SOMA_CELL))
+        by_key = {r.key: r for r in report.results}
+        self.assertFalse(by_key["valid_soma_format"].passed)
+        for key in ("no_node_id_gaps", "parent_id_less_than_child_id", "no_duplicate_node_ids", "no_parent_cycles"):
+            self.assertTrue(by_key[key].passed, f"{key}: {by_key[key].message}")
+
+    def _assert_every_check_ran(self, report) -> dict:
+        by_key = {r.key: r for r in report.results}
+        enabled = {k for k, rule in load_validation_config()["checks"].items() if rule.get("enabled", True)}
+        self.assertEqual(set(by_key), enabled)
+        for result in report.results:
+            self.assertNotIn("raised exception", result.message, result.key)
+        return by_key
+
+    def test_duplicate_ids_are_reported_and_block_neurom_checks_with_a_reason(self) -> None:
+        rows = _clean_neuron_rows()
+        rows.append(rows[5].replace(rows[5].split()[2], "77.0", 1))  # a second row with ID 6
+
+        by_key = self._assert_every_check_ran(run_validation_text(_swc(rows)))
+
+        self.assertEqual(by_key["no_duplicate_node_ids"].status, "fail")
+        self.assertEqual(by_key["no_duplicate_node_ids"].failing_node_ids, [6])
+        blocked = by_key["no_section_index_jumps"].message
+        self.assertIn("Duplicate node IDs: 6", blocked)
+        self.assertNotIn(".swc", blocked)  # not MorphIO's temporary-file message
+
+    def test_parent_cycle_is_reported_and_blocks_neurom_checks(self) -> None:
+        rows = _clean_neuron_rows()
+        n = len(rows)
+        rows += [f"{n + 1} 3 200 0 0 1 {n + 2}", f"{n + 2} 3 205 0 0 1 {n + 1}"]
+
+        by_key = self._assert_every_check_ran(run_validation_text(_swc(rows)))
+
+        self.assertEqual(by_key["no_parent_cycles"].failing_node_ids, [n + 1, n + 2])
+        # MorphIO would silently drop the loop, so NeuroM is not run on it.
+        self.assertIn("Parent cycle", by_key["no_section_index_jumps"].message)
+
+    def test_id_integrity_checks_run_before_the_multiple_soma_stop(self) -> None:
+        rows = list(SMALL_CELL) + [
+            "10 1 100 0 0 5 -1",  # a second cell
+            "11 3 106 0 0 1 10",
+            "11 3 112 0 0 1 10",  # ID 11 twice
+            "7 3 50 0 0 1 8",
+            "8 3 56 0 0 1 7",  # 7 and 8 loop
+        ]
+
+        report = run_validation_text(_swc(rows))
+        by_key = {r.key: r for r in report.results}
+
+        self.assertEqual(report.results[-1].key, "multiple_somas")
+        self.assertFalse(report.results[-1].passed)
+        self.assertEqual(by_key["no_duplicate_node_ids"].failing_node_ids, [11])
+        self.assertEqual(by_key["no_parent_cycles"].failing_node_ids, [7, 8])
 
     def test_every_neuron_morphology_check_runs_on_clean_neuron(self) -> None:
         register_neuron_morphology_checks()

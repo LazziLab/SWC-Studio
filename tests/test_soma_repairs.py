@@ -83,21 +83,74 @@ class ConsolidateSomaTests(unittest.TestCase):
         self.assertEqual(parent, -1)
         self.assertEqual(out[10][1:4], (101.0, 0.0, 0.0))
 
-    def test_radius_is_furthest_distance_plus_that_node_radius(self) -> None:
-        result = consolidate_complex_somas_array(_array(TWO_GROUPS))
+    def test_radius_is_the_sphere_of_equal_surface(self) -> None:
+        # Each soma link is a frustum; the merged soma is the sphere whose
+        # surface equals their summed side area.
+        out = _by_id(consolidate_complex_somas_array(_array(TWO_GROUPS))["array"])
+
+        def side_area(length, ra, rb):
+            return math.pi * (ra + rb) * math.sqrt(length**2 + (ra - rb) ** 2)
+
+        area = side_area(3.0, 1.0, 2.0) + side_area(4.0, 1.5, 2.0)  # links 2-1 and 3-1
+        self.assertAlmostEqual(out[1][4], math.sqrt(area / (4 * math.pi)))
+        # Second group: one 2 um link between two nodes of radius 1.
+        self.assertAlmostEqual(out[10][4], 1.0)
+
+    def test_three_point_soma_keeps_its_radius(self) -> None:
+        # The NeuroMorpho convention: a centre and two points at +-r along y,
+        # each of radius r. Merging must give back r, not 2r.
+        r = 6.817
+        rows = [
+            (1, 1, 10.0, 20.0, 5.0, r, -1),
+            (2, 1, 10.0, 20.0 + r, 5.0, r, 1),
+            (3, 1, 10.0, 20.0 - r, 5.0, r, 1),
+            (4, 3, 10.0, 40.0, 5.0, 1.0, 1),
+        ]
+        result = consolidate_complex_somas_array(_array(rows))
         out = _by_id(result["array"])
-        centroid = (1.0, 4.0 / 3.0, 0.0)
-        distances = {
-            node_id: math.dist(centroid, (x, y, z))
-            for node_id, _, x, y, z, _, _ in TWO_GROUPS[:3]
-        }
-        furthest = max(distances, key=distances.get)
-        self.assertEqual(furthest, 3)
-        expected = distances[3] + 1.5
-        self.assertAlmostEqual(out[1][4], expected)
-        self.assertEqual(result["groups"][0]["furthest_node_id"], 3)
-        # Second group: both nodes 1 um from the centroid, radius 1 each.
-        self.assertAlmostEqual(out[10][4], 2.0)
+        self.assertAlmostEqual(out[1][4], r)
+        self.assertEqual(out[1][1:4], (10.0, 20.0, 5.0))
+        self.assertAlmostEqual(result["groups"][0]["radius"], r)
+        # The validation working copy uses the same rule.
+        ctx = ValidationContext(_swc(rows))
+        soma = [row for row in ctx.arr if int(row["type"]) == 1]
+        self.assertEqual(len(soma), 1)
+        self.assertAlmostEqual(float(soma[0]["radius"]), r)
+
+    def test_radius_matches_the_auto_labeler_soma_merge(self) -> None:
+        from swcstudio.core.labeler.features import SWCNode
+        from swcstudio.core.labeler.swc_normalize import consolidate_multi_point_soma
+
+        # A five-point contour soma with uneven radii, plus a neurite.
+        contour = [
+            (1, 1, 0.0, 0.0, 0.0, 1.0, -1),
+            (2, 1, 3.0, 1.0, 0.0, 0.5, 1),
+            (3, 1, 4.0, 4.0, 1.0, 0.8, 2),
+            (4, 1, 1.0, 5.0, 0.0, 1.2, 3),
+            (5, 1, -2.0, 3.0, 0.5, 0.4, 4),
+            (6, 3, 10.0, 0.0, 0.0, 1.0, 3),
+        ]
+        ours = _by_id(consolidate_complex_somas_array(_array(contour))["array"])
+        nodes, _ = consolidate_multi_point_soma([SWCNode(*row) for row in contour])
+        theirs = {nd.id: nd for nd in nodes}
+        self.assertEqual(sorted(ours), sorted(theirs))
+        self.assertAlmostEqual(ours[1][4], theirs[1].radius)
+        self.assertAlmostEqual(ours[1][1], theirs[1].x)
+        self.assertEqual(ours[6][5], theirs[6].parent)
+
+    def test_duplicate_and_looping_soma_ids_do_not_break_consolidation(self) -> None:
+        rows = [
+            (1, 1, 0.0, 0.0, 0.0, 2.0, 2),  # soma 1 and 2 are each other's parent
+            (2, 1, 2.0, 0.0, 0.0, 2.0, 1),
+            (3, 3, 8.0, 0.0, 0.0, 1.0, 2),
+            (3, 3, 9.0, 0.0, 0.0, 1.0, 2),  # ID 3 twice
+        ]
+        result = consolidate_complex_somas_array(_array(rows))
+        out = result["array"]
+        self.assertEqual(int(np.sum(out["type"] == 1)), 1)
+        self.assertEqual(len(out), 3)
+        soma = out[out["type"] == 1][0]
+        self.assertEqual(int(soma["parent"]), -1)
 
     def test_children_are_rewired_to_the_surviving_soma(self) -> None:
         out = _by_id(consolidate_complex_somas_array(_array(TWO_GROUPS))["array"])

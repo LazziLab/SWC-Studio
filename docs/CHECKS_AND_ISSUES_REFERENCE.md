@@ -54,11 +54,29 @@ So one SWC can raise:
 
 ## Validation Check Matrix
 
+There are 31 checks: 20 native and 11 wrapped from NeuroM.
+
+Most checks read a working copy of the file in which each connected soma
+group is merged into one node, so a complex soma does not trip them. Merging
+removes the merged nodes' IDs and makes each soma a root, so the checks about
+the file's own IDs and parent links (`no_duplicate_node_ids`,
+`no_parent_cycles`, `no_self_loop`, `parent_id_less_than_child_id` and
+`no_node_id_gaps`) read the file as written.
+
+### File Integrity
+
+These run first, so they report even when `multiple_somas` stops validation.
+
+| Key | Issue title | Source | Severity | How checked | Params | JSON | Related tool |
+|---|---|---|---|---|---|---|---|
+| `no_duplicate_node_ids` | `Duplicate node IDs found` | native | critical | Fails when a node ID is on more than one row, and lists those IDs. A parent ID that names a duplicated ID could mean either row, so the NeuroM checks are blocked, and Index Clean and the geometry edits refuse the file. | none | enabled/severity only | none: renumber or remove the duplicated rows in the file, then reload it |
+| `no_parent_cycles` | `Parent cycles found` | native | critical | Follows parent IDs and fails on nodes whose chain closes on itself (two or more nodes, for example A's parent is B and B's parent is A). Those nodes, and the nodes below them, never reach a root. The NeuroM checks are blocked, and Index Clean refuses the file. A node that is its own parent is left to `no_self_loop`. | none | enabled/severity only | Geometry Editing (disconnect, then reconnect) |
+
 ### Structural Presence
 
 | Key | Issue title | Source | Severity | How checked | Params | JSON | Related tool |
 |---|---|---|---|---|---|---|---|
-| `valid_soma_format` | `Complex soma format found` | native | warning | Groups connected type-`1` nodes and fails if any soma group has more than one node. The remaining checks still run, on a working copy with each soma group merged. | none | enabled/severity only | `Consolidate Soma` action |
+| `valid_soma_format` | `Complex soma format found` | native | warning | Groups connected type-`1` nodes and fails if any soma group has more than one node. The remaining checks still run, on a working copy with each soma group merged. Merging (here and in the `Consolidate Soma` action) puts one node at the group's centroid with the radius of the sphere of equal surface: the parent-child links inside the group are summed as frustum side areas and `r = sqrt(area / 4π)`, as L-Measure and the auto-labeler do. A standard three-point soma (a centre and two points at ±r, each of radius r) keeps radius r; a single soma node keeps its radius. | none | enabled/severity only | `Consolidate Soma` action |
 | `multiple_somas` | `Multiple somas found` | native | critical | Runs after temporary soma consolidation and fails if more than one soma anchor remains. The file holds several cells, so validation stops here; split it first. | none | enabled/severity only | `Split` action |
 | `has_soma` | `Soma missing` | native | critical | Fails if no node has type `1`. | none | enabled/severity only | Manual Label Editing / Auto Label Editing |
 | `no_invalid_negative_types` | `Invalid negative types found` | native | critical | Fails if any node type is `< 0`. | none | enabled/severity only | Manual Label Editing |
@@ -74,7 +92,7 @@ So one SWC can raise:
 | `all_neurite_radii_nonzero` | `Invalid neurite radii found` | native | critical | Fails on non-soma nodes with non-finite or `<= 0` radius. | none | enabled/severity only | Manual Radii Editing |
 | `soma_radius_nonzero` | `Invalid soma radius found` | NeuroM | critical | Calls NeuroM `has_nonzero_soma_radius`. | `threshold=0.0` | yes | Manual Radii Editing |
 | `no_ultranarrow_sections` | `Ultranarrow sections found` | NeuroM | warning | Calls NeuroM `has_no_narrow_neurite_section`. | `radius_threshold=0.05`, `considered_section_min_length=50.0` | yes | Manual Radii Editing |
-| `no_ultranarrow_starts` | `Ultranarrow branch starts found` | NeuroM | warning | Calls NeuroM `has_no_narrow_start`. | `frac=0.9` | yes | Manual Radii Editing |
+| `no_ultranarrow_starts` | `Ultranarrow branch starts found` | NeuroM | warning | NeuroM's `has_no_narrow_start` rule, evaluated by SWC-Studio on the NeuroM morphology: a neurite fails when its first point's radius is below `frac` times the next point's. NeuroM 4.0.5 errors when a neurite branches at its first node; there the next point on each branch is used, and the neurite fails if its first point is narrow against any of them. | `frac=0.9` | yes | Manual Radii Editing |
 | `no_fat_terminal_ends` | `Oversized terminal ends found` | NeuroM | warning | Calls NeuroM `has_no_fat_ends`. | `multiple_of_mean=2.0`, `final_point_count=5` | yes | Manual Radii Editing |
 | `radius_upper_bound` | `Oversized radii found` | native | warning | Fails when any radius is above `max_radius`. | `max_radius=20.0` | yes | Auto Radii Editing |
 
@@ -94,7 +112,7 @@ So one SWC can raise:
 | Key | Issue title | Source | Severity | How checked | Params | JSON | Related tool |
 |---|---|---|---|---|---|---|---|
 | `no_dangling_branches` | `Dangling branches found` | native | critical | Fails on non-soma nodes with `parent == -1`. | none | enabled/severity only | Geometry Editing |
-| `no_self_loop` | `Self loops found` | native | critical | Fails when `parent == id`. | none | enabled/severity only | Geometry Editing |
+| `no_self_loop` | `Self loops found` | native | critical | Fails when `parent == id`, read from the file as written. | none | enabled/severity only | Geometry Editing |
 | `no_single_child_chains` | `Single-child chains found` | NeuroM | warning | Calls NeuroM `has_no_single_children`. | none | enabled/severity only | Geometry Editing |
 | `has_unifurcation` | `Unifurcation found` | NeuroM | warning | Calls NeuroM `has_unifurcation`. | none | enabled/severity only | Geometry Editing |
 | `has_multifurcation` | `Multifurcation found` | NeuroM | warning | Calls NeuroM `has_multifurcation`. | none | enabled/severity only | Geometry Editing |
@@ -105,8 +123,12 @@ So one SWC can raise:
 |---|---|---|---|---|---|---|---|
 | `no_section_index_jumps` | `Sections jump too far along Z` | NeuroM | critical | Calls NeuroM `has_no_jumps` and uses it as a Z-axis consistency check. | `max_distance=30.0`, `axis="z"` | yes | Geometry Editing |
 | `no_root_index_jumps` | `Neurite roots too far from soma` | NeuroM | critical | Calls NeuroM `has_no_root_node_jumps`. | `radius_multiplier=2.0` | yes | Geometry Editing |
-| `parent_id_less_than_child_id` | `Parent-child ID order violations found` | native | warning | Fails when a valid in-file parent ID is `>=` child ID. | none | enabled/severity only | Index Clean |
-| `no_node_id_gaps` | `Node ID gaps found` | native | info | Fails when sorted unique node IDs skip integers. | none | enabled/severity only | Index Clean |
+| `parent_id_less_than_child_id` | `Parent-child ID order violations found` | native | warning | Fails when a valid in-file parent ID is `>=` child ID, read from the file as written. | none | enabled/severity only | Index Clean |
+| `no_node_id_gaps` | `Node ID gaps found` | native | info | Fails when sorted unique node IDs skip integers, read from the file as written (merging a complex soma does not count as a gap). | none | enabled/severity only | Index Clean |
+
+Index Clean refuses a file with duplicate node IDs or a parent cycle,
+including a node that is its own parent, and writes nothing. The error names
+the IDs.
 
 ## GUI-Only Issue Generators
 
@@ -114,7 +136,7 @@ These are shown in the issue-driven workflow but are not entries in `default.jso
 
 | Source key | Title | How generated | Config source | Related tool |
 |---|---|---|---|---|
-| `blocked_validation_checks` | `Checks blocked by ...` | Grouped from validation rows that could not run because morphology building failed. | none | Validation or Manual Label Editing, depending on cause |
+| `blocked_validation_checks` | `Checks blocked by ...` | Grouped from validation rows that could not run because morphology building failed. Duplicate node IDs and parent cycles (including a node that is its own parent) block the NeuroM checks with their own titles. | none | Validation, Manual Label Editing or Geometry Editing, depending on cause |
 | `radii_outlier_batch` | `Outlier radii detected` | Runs the shared radii-cleaning engine and groups nodes the cleaner would change. | `swcstudio/tools/batch_processing/configs/radii_cleaning.json` | Auto Radii Editing |
 | `type_suspicion_batch` | `Likely wrong labels` | Runs the auto-labeler on the file (labels only; the quality flag is not scored) and groups the nodes whose current type differs from the labeler's type. In the GUI it runs again on each validation refresh. | `swcstudio/tools/batch_processing/configs/auto_typing.json` (its `cell_type` and `model_dir`) | Auto Label Editing |
 

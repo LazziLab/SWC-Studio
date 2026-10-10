@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import re
 import tempfile
@@ -15,6 +16,7 @@ import numpy as np
 from neurom.core import Morphology
 
 from swcstudio.core.config import merge_config
+from swcstudio.core.geometry_editing import duplicate_node_ids, format_id_list, parent_cycles
 from swcstudio.core.validation_catalog import CHECK_ORDER, display_label_for_result
 from swcstudio.core.validation_registry import get_check
 from swcstudio.core.validation_results import CheckResult, PreCheckItem, ValidationReport
@@ -37,6 +39,15 @@ _ANSI_RE = re.compile(r"\x1B\[[0-9;]*[A-Za-z]")
 
 
 class ValidationContext:
+    """What the checks read.
+
+    ``arr`` (and ``ids``, ``parents``, ...) is a working copy with each
+    connected soma group merged into one node, so a complex soma does not
+    trip the other checks. Merging deletes the merged nodes' IDs and re-roots
+    each soma, so checks about the file's own IDs, ordering and parent links
+    read ``original_arr`` (``original_ids``, ``original_parents``) instead.
+    """
+
     def __init__(self, swc_text: str):
         self.original_swc_text = swc_text
         self.original_arr = _load_swc_to_array(swc_text)
@@ -47,6 +58,16 @@ class ValidationContext:
         self._morph: Morphology | None = None
         self._morph_error: str | None = None
         self._raw = None
+
+    @property
+    def original_ids(self) -> np.ndarray:
+        arr = self.original_arr
+        return arr["id"] if arr.size else np.array([], dtype=np.int64)
+
+    @property
+    def original_parents(self) -> np.ndarray:
+        arr = self.original_arr
+        return arr["parent"] if arr.size else np.array([], dtype=np.int64)
 
     @property
     def ids(self) -> np.ndarray:
@@ -81,10 +102,40 @@ class ValidationContext:
                 cmap.setdefault(pid, []).append(int(self.ids[i]))
         return cmap
 
+    def _morphology_blocker(self) -> str | None:
+        """Why the working copy cannot become a faithful morphology, if it cannot.
+
+        MorphIO rejects a repeated ID with a message that names only its
+        temporary file, and it silently drops the nodes on a parent cycle
+        (and everything below them), so the NeuroM checks would judge a
+        different tree than the file holds.
+        """
+        ids = [int(v) for v in self.ids.tolist()]
+        dups = duplicate_node_ids(ids)
+        if dups:
+            return (
+                f"Duplicate node IDs: {format_id_list(dups)} "
+                f"{'appears' if len(dups) == 1 else 'appear'} on more than one row. "
+                "Give every row its own ID first."
+            )
+        cycles = parent_cycles(ids, [int(v) for v in self.parents.tolist()], include_self_loops=True)
+        if cycles:
+            on_cycles = sorted({int(v) for cycle in cycles for v in cycle})
+            return (
+                f"Parent cycle: the parent chain of node(s) {format_id_list(on_cycles)} "
+                "never reaches a root. Break the cycle first."
+            )
+        return None
+
     def get_morphology(self) -> Morphology | None:
         if self._morph is not None:
             return self._morph
         if self._morph_error is not None:
+            return None
+
+        blocker = self._morphology_blocker()
+        if blocker is not None:
+            self._morph_error = blocker
             return None
 
         tmp_fd, tmp_path = tempfile.mkstemp(suffix=".swc")
@@ -157,13 +208,48 @@ def _array_to_swc_text(arr: np.ndarray) -> str:
     return "# id type x y z radius parent\n" + buf.getvalue()
 
 
+def _soma_group_radius(
+    group: list[int],
+    anchor_idx: int,
+    parents: np.ndarray,
+    id_to_index: dict[int, int],
+    xyz: np.ndarray,
+    radii: np.ndarray,
+) -> float:
+    """Radius of the sphere with the same surface as the soma group's points.
+
+    The same rule as the auto-labeler's soma merge
+    (``swcstudio/core/labeler/swc_normalize.py``) and L-Measure: each
+    parent-child link inside the group is a frustum, and the merged soma is
+    the sphere whose surface equals their summed side area. The three-point
+    soma convention (a centre and two points at +-r, each of radius r) is
+    built so that this gives back exactly r. A single node keeps its radius.
+    """
+    anchor_radius = max(float(radii[anchor_idx]), 0.0)
+    if len(group) == 1:
+        return anchor_radius
+    in_group = set(group)
+    area = 0.0
+    for i in group:
+        parent_id = int(parents[i])
+        p = id_to_index.get(parent_id) if parent_id != -1 else None
+        if p is None or p not in in_group:
+            continue
+        length = float(np.linalg.norm(xyz[i] - xyz[p]))
+        ra = max(float(radii[i]), 0.0)
+        rb = max(float(radii[p]), 0.0)
+        area += math.pi * (ra + rb) * math.sqrt(length * length + (ra - rb) ** 2)
+    return math.sqrt(area / (4.0 * math.pi)) if area > 0 else anchor_radius
+
+
 def consolidate_complex_somas_array(arr: np.ndarray) -> dict[str, Any]:
     """Collapse connected soma groups without renumbering surviving node IDs.
 
-    Each connected type-1 soma component is reduced to one anchor soma node with
-    updated centroid/radius. Non-anchor soma nodes are removed, and any child that
-    pointed to a removed soma node is rewired to the surviving anchor ID. Surviving
-    node IDs are preserved; no global reindexing is performed here.
+    Each connected type-1 soma component is reduced to one anchor soma node at
+    the group's centroid, with the radius of the sphere of equal surface (see
+    ``_soma_group_radius``). Non-anchor soma nodes are removed, and any child
+    that pointed to a removed soma node is rewired to the surviving anchor ID.
+    Surviving node IDs are preserved; no global reindexing is performed here.
     """
     out = np.array(arr, copy=True)
     if out.size == 0:
@@ -235,16 +321,8 @@ def consolidate_complex_somas_array(arr: np.ndarray) -> dict[str, Any]:
         group_ids = [int(ids[i]) for i in group]
         anchor_idx = next((i for i in group if int(parents[i]) == -1), group[0])
         anchor_id = int(ids[anchor_idx])
-        group_xyz = xyz[group]
-        centroid = np.mean(group_xyz, axis=0) if len(group) else np.zeros(3, dtype=np.float64)
-        distances = np.linalg.norm(group_xyz - centroid, axis=1) if len(group) else np.zeros(0, dtype=np.float64)
-        if distances.size:
-            furthest_pos = int(np.argmax(distances))
-            furthest_idx = group[furthest_pos]
-            mega_radius = float(distances[furthest_pos] + max(float(radii[furthest_idx]), 0.0))
-        else:
-            furthest_idx = anchor_idx
-            mega_radius = float(max(float(radii[anchor_idx]), 0.0))
+        centroid = np.mean(xyz[group], axis=0) if len(group) else np.zeros(3, dtype=np.float64)
+        mega_radius = _soma_group_radius(group, anchor_idx, parents, id_to_index, xyz, radii)
 
         out["type"][anchor_idx] = 1
         out["x"][anchor_idx] = float(centroid[0])
@@ -265,7 +343,6 @@ def consolidate_complex_somas_array(arr: np.ndarray) -> dict[str, Any]:
                 "group_size": len(group),
                 "centroid": [float(centroid[0]), float(centroid[1]), float(centroid[2])],
                 "radius": float(mega_radius),
-                "furthest_node_id": int(ids[furthest_idx]),
             }
         )
 

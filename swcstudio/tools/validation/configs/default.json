@@ -1,5 +1,7 @@
 {
   "checks": {
+    "no_duplicate_node_ids": {"enabled": true, "severity": "error", "params": {}},
+    "no_parent_cycles": {"enabled": true, "severity": "error", "params": {}},
     "valid_soma_format": {"enabled": true, "severity": "warning", "params": {}},
     "multiple_somas": {"enabled": true, "severity": "error", "params": {}},
     "has_soma": {"enabled": true, "severity": "error", "params": {}},

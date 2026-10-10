@@ -7,11 +7,28 @@ from typing import Any
 import numpy as np
 
 from swcstudio.core.custom_types import load_custom_type_definitions
+from swcstudio.core.geometry_editing import format_id_list, nodes_cut_off_by_cycles, parent_cycles
 from swcstudio.core.validation_registry import register_check
 from swcstudio.core.validation_results import CheckResult
 
 
 _REGISTERED = False
+
+
+def _original_ids_parents(ctx) -> tuple[np.ndarray, np.ndarray]:
+    """The file's own node IDs and parent IDs, before soma groups are merged.
+
+    The working copy (``ctx.ids``) drops the IDs of merged soma nodes and
+    re-roots each soma, so checks about IDs, ordering and parent links read
+    the original rows instead.
+    """
+    arr = getattr(ctx, "original_arr", None)
+    if arr is None:
+        return np.asarray(ctx.ids, dtype=np.int64), np.asarray(ctx.parents, dtype=np.int64)
+    if arr.size == 0:
+        empty = np.array([], dtype=np.int64)
+        return empty, empty
+    return np.asarray(arr["id"], dtype=np.int64), np.asarray(arr["parent"], dtype=np.int64)
 
 
 def _native_cache(ctx) -> dict[str, Any]:
@@ -354,10 +371,83 @@ def _check_no_dangling_branches(ctx, params: dict[str, Any]) -> CheckResult:
     )
 
 
+def _check_no_duplicate_node_ids(ctx, params: dict[str, Any]) -> CheckResult:
+    _ = params
+    ids, _parents = _original_ids_parents(ctx)
+    unique_ids, counts = np.unique(ids, return_counts=True)
+    dup_mask = counts > 1
+    dup_ids = unique_ids[dup_mask].astype(np.int64).tolist()
+    dup_counts = counts[dup_mask].astype(np.int64).tolist()
+    dup_row_count = int(sum(dup_counts))
+    passed = len(dup_ids) == 0
+    msg = (
+        "Every node ID is on one row."
+        if passed
+        else (
+            f"Found {len(dup_ids)} node ID(s) used on more than one row "
+            f"({dup_row_count} rows in all): {format_id_list(dup_ids)}."
+        )
+    )
+    return CheckResult.from_pass_fail(
+        key="no_duplicate_node_ids",
+        label="Node IDs are unique",
+        passed=passed,
+        severity="error",
+        message=msg,
+        source="native",
+        failing_node_ids=dup_ids,
+        metrics={
+            "duplicate_id_count": len(dup_ids),
+            "duplicate_row_count": dup_row_count,
+            "duplicate_ids_sample": [
+                {"id": int(node_id), "row_count": int(count)}
+                for node_id, count in zip(dup_ids[:20], dup_counts[:20])
+            ],
+        },
+    )
+
+
+def _check_no_parent_cycles(ctx, params: dict[str, Any]) -> CheckResult:
+    _ = params
+    ids, parents = _original_ids_parents(ctx)
+    id_list = ids.astype(np.int64).tolist()
+    parent_list = parents.astype(np.int64).tolist()
+    # Self loops are reported by no_self_loop.
+    cycles = parent_cycles(id_list, parent_list, include_self_loops=False)
+    on_cycle = sorted({int(v) for cycle in cycles for v in cycle})
+    cut_off = nodes_cut_off_by_cycles(id_list, parent_list, cycles)
+    passed = len(cycles) == 0
+    msg = (
+        "Every parent chain reaches a root."
+        if passed
+        else (
+            f"Found {len(cycles)} parent cycle(s) through {len(on_cycle)} node(s): "
+            f"{format_id_list(on_cycle)}. Including the nodes below them, "
+            f"{len(cut_off)} node(s) never reach a root."
+        )
+    )
+    return CheckResult.from_pass_fail(
+        key="no_parent_cycles",
+        label="No parent cycles",
+        passed=passed,
+        severity="error",
+        message=msg,
+        source="native",
+        failing_node_ids=on_cycle,
+        metrics={
+            "cycle_count": len(cycles),
+            "cycle_node_count": len(on_cycle),
+            "cut_off_node_count": len(cut_off),
+            "cycles_sample": [cycle[:50] for cycle in cycles[:10]],
+        },
+    )
+
+
 def _check_no_self_loop(ctx, params: dict[str, Any]) -> CheckResult:
     _ = params
-    ids = np.asarray(ctx.ids, dtype=np.int64)
-    parents = np.asarray(ctx.parents, dtype=np.int64)
+    # Soma consolidation re-roots each soma, which would hide a soma that is
+    # its own parent, so read the file's own parent IDs.
+    ids, parents = _original_ids_parents(ctx)
     bad_mask = parents == ids
     bad_ids = ids[bad_mask].astype(np.int64).tolist()
     passed = len(bad_ids) == 0
@@ -376,8 +466,7 @@ def _check_no_self_loop(ctx, params: dict[str, Any]) -> CheckResult:
 
 def _check_parent_id_less_than_child_id(ctx, params: dict[str, Any]) -> CheckResult:
     _ = params
-    ids = np.asarray(ctx.ids, dtype=np.int64)
-    parents = np.asarray(ctx.parents, dtype=np.int64)
+    ids, parents = _original_ids_parents(ctx)
     valid_ids = {int(v) for v in ids.astype(np.int64).tolist()}
     valid_parent_mask = (parents >= 0) & np.isin(parents, list(valid_ids), assume_unique=False)
     bad_mask = valid_parent_mask & (parents >= ids)
@@ -402,7 +491,9 @@ def _check_parent_id_less_than_child_id(ctx, params: dict[str, Any]) -> CheckRes
 
 def _check_no_node_id_gaps(ctx, params: dict[str, Any]) -> CheckResult:
     _ = params
-    ids = np.asarray(ctx.ids, dtype=np.int64)
+    # Soma consolidation deletes the merged soma nodes' IDs, which would read
+    # as gaps; the file's own IDs decide.
+    ids, _parents = _original_ids_parents(ctx)
     if ids.size <= 1:
         return CheckResult.from_pass_fail(
             key="no_node_id_gaps",
@@ -692,6 +783,18 @@ def register_native_checks() -> None:
     if _REGISTERED:
         return
 
+    register_check(
+        key="no_duplicate_node_ids",
+        label="Node IDs are unique",
+        source="native",
+        runner=_check_no_duplicate_node_ids,
+    )
+    register_check(
+        key="no_parent_cycles",
+        label="No parent cycles",
+        source="native",
+        runner=_check_no_parent_cycles,
+    )
     register_check(
         key="valid_soma_format",
         label="Soma format is simple",
