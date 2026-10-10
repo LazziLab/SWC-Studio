@@ -49,7 +49,7 @@ Use this path if you only need the desktop application and don't want to deal wi
 1. Open <https://github.com/Mio0v0/SWC-Studio/releases/latest>
 2. Download `SWC-Studio-vX.Y.Z-macOS.zip` or `SWC-Studio-vX.Y.Z-Windows.zip` (X.Y.Z is the latest version)
 3. Extract and launch:
-   - **macOS** — drag `SWC-Studio.app` into `/Applications`, then double-click. First launch needs `xattr -cr /Applications/SWC-Studio.app` or right-click → Open (the bundle is not yet code-signed).
+   - **macOS** (Apple silicon) — drag `SWC-Studio.app` into `/Applications`, then double-click. The app is not yet signed by Apple, so the first time macOS blocks it: open **System Settings → Privacy & Security**, click **Open Anyway** next to "SWC-Studio was blocked", and confirm. Or run `xattr -cr /Applications/SWC-Studio.app` once in Terminal. See [First launch on macOS](docs/GETTING_STARTED.md#first-launch-on-macos). On an Intel Mac, use Option 2.
    - **Windows** — extract anywhere and run the `.exe` inside.
 
 The auto-labeling models are bundled inside the app, so no separate

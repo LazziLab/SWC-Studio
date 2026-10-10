@@ -29,12 +29,43 @@ Use this path if you only need the desktop application and don't want to deal wi
 1. open <https://github.com/Mio0v0/SWC-Studio/releases/latest>
 2. download `SWC-Studio-vX.Y.Z-macOS.zip` (Mac) or `SWC-Studio-vX.Y.Z-Windows.zip` (Windows)
 3. extract and launch:
-   - **macOS** — drag `SWC-Studio.app` into `/Applications`, then double-click. First launch may need `xattr -cr /Applications/SWC-Studio.app` (or right-click → Open) because the bundle is not yet code-signed.
+   - **macOS** — drag `SWC-Studio.app` into `/Applications`, then open it as described in [First launch on macOS](#first-launch-on-macos).
    - **Windows** — extract anywhere, run the `.exe` inside.
 
 The auto-labeler's model files are bundled inside the app, so the first
 auto-label run works without any download. Auto-labeling runs on the
 CPU and needs no GPU.
+
+### First launch on macOS
+
+The app is not yet signed by Apple, so macOS blocks it the first time.
+You allow it once; after that it opens normally.
+
+1. Move `SWC-Studio.app` into `/Applications` first. An app started from
+   the Downloads folder or from inside the zip runs from a temporary
+   copy and cannot save its settings.
+2. Double-click it. macOS says it could not verify the app. Click
+   **Done** (or **Cancel**).
+3. Open **System Settings → Privacy & Security** and scroll down to
+   **Security**. Next to "SWC-Studio was blocked", click **Open Anyway**,
+   confirm with your password or Touch ID, then click **Open Anyway**
+   again.
+
+Instead of steps 2–3 you can run this once in Terminal:
+
+```bash
+xattr -cr /Applications/SWC-Studio.app
+```
+
+On macOS 14 and earlier, Control-click the app and choose **Open** also
+works. macOS 15 removed that shortcut, so use **Open Anyway** there.
+
+When SWC-Studio first opens or saves files in your Desktop, Documents or
+Downloads folder, macOS asks whether to allow it. Click **Allow**, or
+batch runs on those folders cannot write their results.
+
+The macOS app is built for Apple silicon (M1 and later). On an Intel
+Mac, install with `pip` instead ([Option 2](#option-2--pip-install-from-pypi)).
 
 ## Option 2 — `pip install` from PyPI
 

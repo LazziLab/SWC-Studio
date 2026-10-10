@@ -135,8 +135,8 @@ git tag vX.Y.Z
 **macOS build fails with "developer cannot be verified"**
 The released `.app` is unsigned. Users will see the Gatekeeper warning on first launch. Solutions in order of effort:
 
-* Tell users: right-click .app -> Open the first time
-* Or in their Terminal: `xattr -cr SWC-Studio.app`
+* Tell users: System Settings -> Privacy & Security -> Open Anyway the first time (macOS 15 dropped right-click -> Open); see docs/GETTING_STARTED.md#first-launch-on-macos
+* Or in their Terminal: `xattr -cr /Applications/SWC-Studio.app`
 * Long-term fix: Apple Developer ID + notarization (~$99/yr)
 
 **PyPI publish fails with "trusted publisher not configured"**
