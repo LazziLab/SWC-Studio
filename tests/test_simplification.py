@@ -39,6 +39,8 @@ TREE_ROWS = [
     "21 3 14 5 0 1 20",
 ]
 ROOT = 1
+# Node 2 is the first basal node after the soma: a type boundary, always kept.
+NEURITE_START = 2
 BIFURCATION = 11
 TIPS = {16, 21}
 DEVIATING = 19
@@ -91,7 +93,7 @@ class SimplificationTests(unittest.TestCase):
     def test_expected_nodes_are_kept_and_removed(self) -> None:
         out = self._simplify(TREE_ROWS)
         kept = set(out["kept_node_ids"])
-        self.assertEqual(kept, {ROOT, BIFURCATION, DEVIATING, RADIUS_SENSITIVE} | TIPS)
+        self.assertEqual(kept, {ROOT, NEURITE_START, BIFURCATION, DEVIATING, RADIUS_SENSITIVE} | TIPS)
         self.assertEqual(
             sorted(out["removed_node_ids"]),
             sorted(set(range(1, 22)) - kept),
@@ -102,14 +104,14 @@ class SimplificationTests(unittest.TestCase):
 
     def test_roots_tips_and_bifurcations_are_always_kept(self) -> None:
         out = self._simplify(TREE_ROWS, epsilon=1000.0, radius_tolerance=1000.0)
-        self.assertEqual(set(out["kept_node_ids"]), {ROOT, BIFURCATION} | TIPS)
+        self.assertEqual(set(out["kept_node_ids"]), {ROOT, NEURITE_START, BIFURCATION} | TIPS)
         self._assert_valid_tree(out, TREE_ROWS)
 
     def test_collinear_interior_points_are_removed(self) -> None:
         rows = ["1 1 0 0 0 1 -1"] + [f"{k} 3 {k - 1} 0 0 1 {k - 1}" for k in range(2, 12)]
         out = self._simplify(rows, epsilon=0.01)
-        self.assertEqual(out["kept_node_ids"], [1, 11])
-        self.assertEqual(out["dataframe"]["parent"].tolist(), [-1, 1])
+        self.assertEqual(out["kept_node_ids"], [1, 2, 11])
+        self.assertEqual(out["dataframe"]["parent"].tolist(), [-1, 1, 2])
         self._assert_valid_tree(out, rows)
 
     def test_point_beyond_epsilon_is_kept_and_point_within_is_removed(self) -> None:
@@ -127,7 +129,7 @@ class SimplificationTests(unittest.TestCase):
         rows = ["1 1 0 0 0 1 -1"] + [f"{k} 3 {k - 1} 0 0 1 {k - 1}" for k in range(2, 12)]
         rows[5] = "6 3 5 0 0 4 5"
         out = self._simplify(rows, epsilon=100.0, radius_tolerance=0.5)
-        self.assertEqual(out["kept_node_ids"], [1, 6, 11])
+        self.assertEqual(out["kept_node_ids"], [1, 2, 6, 11])
         self.assertEqual(out["protected_counts"]["radius_sensitive"], 1)
         self._assert_valid_tree(out, rows)
 
@@ -140,6 +142,25 @@ class SimplificationTests(unittest.TestCase):
             parts = line.split()
             src = original[int(parts[0])]
             self.assertEqual(parts[:6], src[:6], f"node {parts[0]} changed")
+
+    def test_soma_outline_points_are_kept(self) -> None:
+        # A soma traced as a chain of collinear points, then a dendrite.
+        rows = ["1 1 0 0 0 2 -1"] + [f"{k} 1 {k - 1} 0 0 2 {k - 1}" for k in range(2, 8)]
+        rows += [f"{k} 3 {k - 1} 0 0 1 {k - 1}" for k in range(8, 20)]
+        kept = set(self._simplify(rows)["kept_node_ids"])
+        self.assertTrue(set(range(1, 8)) <= kept)
+        dropped = set(simplify_morphology_dataframe(
+            parse_swc_text_preserve_tokens(_swc(rows)), {"flags": {"keep_soma": False}}
+        )["removed_node_ids"])
+        self.assertTrue(dropped & set(range(2, 7)))
+
+    def test_compartment_start_is_kept(self) -> None:
+        # One straight unbranched path whose type changes from basal (3) to
+        # axon (2) at node 9: RDP alone would drop node 9.
+        rows = ["1 1 0 0 0 2 -1"] + [f"{k} 3 {k} 0 0 1 {k - 1}" for k in range(2, 9)]
+        rows += [f"{k} 2 {k} 0 0 1 {k - 1}" for k in range(9, 16)]
+        kept = set(self._simplify(rows)["kept_node_ids"])
+        self.assertIn(9, kept)
 
     def test_core_function_matches_wrapper(self) -> None:
         df = parse_swc_text_preserve_tokens(_swc(TREE_ROWS))

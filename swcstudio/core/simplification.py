@@ -108,8 +108,10 @@ def simplify_morphology_dataframe(df: pd.DataFrame, config: dict[str, Any]) -> d
                 "radius_tolerance": float(config.get("thresholds", {}).get("radius_tolerance", 0.5)),
                 "keep_tips": bool(config.get("flags", {}).get("keep_tips", True)),
                 "keep_bifurcations": bool(config.get("flags", {}).get("keep_bifurcations", True)),
+                "keep_soma": bool(config.get("flags", {}).get("keep_soma", True)),
             },
-            "protected_counts": {"roots": 0, "tips": 0, "bifurcations": 0, "radius_sensitive": 0},
+            "protected_counts": {"roots": 0, "tips": 0, "bifurcations": 0, "soma": 0,
+                                 "type_boundaries": 0, "radius_sensitive": 0},
         }
 
     thresholds = dict(config.get("thresholds", {}))
@@ -120,6 +122,7 @@ def simplify_morphology_dataframe(df: pd.DataFrame, config: dict[str, Any]) -> d
     keep_tips = bool(flags.get("keep_tips", True))
     keep_bifs = bool(flags.get("keep_bifurcations", True))
     keep_roots = bool(flags.get("keep_roots", True))
+    keep_soma = bool(flags.get("keep_soma", True))
 
     id_to_idx, children, ids, child_counts = _build_graph(out_df)
     parents = out_df["parent"].to_numpy(dtype=int)
@@ -129,15 +132,30 @@ def simplify_morphology_dataframe(df: pd.DataFrame, config: dict[str, Any]) -> d
     root_idx = {i for i in range(len(out_df)) if int(parents[i]) == -1}
     tip_idx = {i for i in range(len(out_df)) if int(child_counts[i]) == 0}
     bif_idx = {i for i in range(len(out_df)) if int(child_counts[i]) > 1}
+    types = out_df["type"].to_numpy(dtype=int)
+    # A soma outline is shape, not a path to straighten; and a node whose
+    # type differs from its parent's marks where a compartment starts, so
+    # removing it would move the axon or apical start.
+    soma_idx = {i for i in range(len(out_df)) if int(types[i]) == 1}
+    boundary_idx = {
+        i for i in range(len(out_df))
+        if int(parents[i]) in id_to_idx and int(types[id_to_idx[int(parents[i])]]) != int(types[i])
+    }
 
     protected: set[int] = set(root_idx if keep_roots else [])
     if keep_tips:
         protected.update(tip_idx)
     if keep_bifs:
         protected.update(bif_idx)
+    if keep_soma:
+        protected.update(soma_idx)
+    protected.update(boundary_idx)
 
     anchors: set[int] = set(root_idx)
     anchors.update(i for i in range(len(out_df)) if int(child_counts[i]) != 1)
+    anchors.update(boundary_idx)
+    if keep_soma:
+        anchors.update(soma_idx)
 
     paths = _extract_anchor_paths(children, anchors)
 
@@ -217,11 +235,14 @@ def simplify_morphology_dataframe(df: pd.DataFrame, config: dict[str, Any]) -> d
             "keep_tips": keep_tips,
             "keep_bifurcations": keep_bifs,
             "keep_roots": keep_roots,
+            "keep_soma": keep_soma,
         },
         "protected_counts": {
             "roots": len(root_idx),
             "tips": len(tip_idx) if keep_tips else 0,
             "bifurcations": len(bif_idx) if keep_bifs else 0,
+            "soma": len(soma_idx) if keep_soma else 0,
+            "type_boundaries": len(boundary_idx),
             "radius_sensitive": len(radius_sensitive),
         },
     }

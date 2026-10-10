@@ -21,6 +21,16 @@ Current config file:
 - `flags.keep_tips`
 - `flags.keep_bifurcations`
 - `flags.keep_roots`
+- `flags.keep_soma` (default `true`): keep every soma point, so a soma
+  traced as an outline keeps its shape
+
+A node whose type differs from its parent's (where the axon, a basal or
+an apical dendrite starts) is always kept, whatever the flags, so
+simplification never moves a compartment's start.
+
+Simplification straightens paths: with the default `epsilon` of 2 µm,
+tortuous neurites can lose a noticeable share of their cable length.
+Lower `epsilon` when path length or tortuosity matters to your analysis.
 
 ## Parameter guidance
 

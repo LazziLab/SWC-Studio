@@ -36,6 +36,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "keep_tips": True,
         "keep_bifurcations": True,
         "keep_roots": True,
+        "keep_soma": True,
     },
     "output": {
         "suffix": "_simplified",
