@@ -74,6 +74,22 @@ follow [Semantic Versioning](https://semver.org/).
   files are now skipped.
 - The desktop app loaded a downloaded code update even when it was older
   than the code bundled with the app. It now uses the newer of the two.
+- `history export-crate -o <dir>` deleted `<dir>` if it already existed,
+  so pointing it at the SWC's own folder deleted the SWC and everything
+  beside it. It now refuses any folder that is not new or empty, and no
+  longer repacks the file's history archive.
+- `history verify` reported a false failure while the History Browser
+  was open (it rewrites the SQLite index, a cache) and aborted on a
+  damaged AI-run record instead of reporting it.
+- `history reproduce` passes `--model-dir` only when a non-default model
+  folder was used, and records the model version and fingerprint.
+- Simplification kept soma outlines no better than any path (a 111-point
+  outline could drop to 6 points) and could remove the node where an axon
+  or dendrite starts. Soma points (`keep_soma`, default on) and type
+  boundaries are now always kept.
+- After an in-app code update, the desktop app reported, and recorded in
+  file histories, the version it was installed with instead of the code
+  it runs.
 
 ## [0.2.1] - 2026-06-19
 
