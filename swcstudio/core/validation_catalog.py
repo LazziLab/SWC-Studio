@@ -71,6 +71,11 @@ CHECK_CATALOG: list[tuple[str, list[tuple[str, str, str]]]] = [
                 "No oversized terminal ends",
                 "Terminal points should not be abnormally thicker than the branch trend.",
             ),
+            (
+                "radius_upper_bound",
+                "No oversized radii",
+                "Flags nodes whose radius exceeds the configured maximum (max_radius, 20 by default). Off by default.",
+            ),
         ],
     ),
     (
