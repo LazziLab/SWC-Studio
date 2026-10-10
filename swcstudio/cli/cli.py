@@ -239,6 +239,22 @@ def _print_validation_precheck(report: dict) -> None:
         print("")
 
 
+def _recorded_model_dir(model_dir: str | None) -> str | None:
+    """The model folder as stored in the file's history, home written as ``~``.
+
+    The history travels with the SWC, so a path under the home folder
+    would carry the username. Model lookup expands ``~`` again, so the
+    command ``history reproduce`` prints still finds the folder.
+    """
+    if not model_dir:
+        return model_dir
+    path = Path(model_dir).expanduser().absolute()
+    try:
+        return "~/" + path.relative_to(Path.home()).as_posix()
+    except ValueError:
+        return str(model_dir)
+
+
 def _status_tag(status: str) -> str:
     s = str(status or "").lower()
     if s == "pass":
@@ -1099,7 +1115,7 @@ def main(argv: list[str] | None = None) -> int:
                     "flag_enabled": bool(opts.flag_enabled),
                     "flag_budget": float(opts.flag_budget),
                     "labeler_version": out.get("labeler_version"),
-                    "model_dir": cfg_overrides.get("model_dir"),
+                    "model_dir": _recorded_model_dir(cfg_overrides.get("model_dir")),
                     "nodes_total": int(out.get("nodes_total", 0)),
                     "type_changes": int(out.get("type_changes", 0)),
                     "cell_type_result": out.get("cell_type"),
@@ -1516,7 +1532,7 @@ def main(argv: list[str] | None = None) -> int:
                 "cell_type": opts.cell_type,
                 "flag_enabled": bool(opts.flag_enabled),
                 "labeler_version": out.get("labeler_version"),
-                "model_dir": cfg_overrides.get("model_dir"),
+                "model_dir": _recorded_model_dir(cfg_overrides.get("model_dir")),
                 "nodes_total": int(out.get("nodes_total", 0)),
                 "type_changes": int(out.get("type_changes", 0)),
                 "cell_type_result": out.get("cell_type"),

@@ -108,7 +108,7 @@ def search_dirs(override: str | os.PathLike | None = None) -> list[Path]:
     A named folder (``override``, else ``SWCSTUDIO_MODEL_DIR``) is searched alone."""
     named = override or os.environ.get(ENV_VAR)
     if named:
-        return [Path(named)]
+        return [Path(named).expanduser()]
     out: list[Path] = [user_model_dir()]
     bundled_override = os.environ.get(BUNDLED_ENV_VAR)
     if bundled_override:
