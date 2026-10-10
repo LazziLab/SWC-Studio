@@ -115,6 +115,12 @@ The GUI keeps:
 - the source SWC updated with the current state
 - an encrypted history archive next to the SWC
 
+If a batch run or another program changes a file while it is open, the
+GUI reloads its tab, or asks before an edit or a save would write over
+those changes; a tab that keeps its own version is marked
+`[changed on disk]`. See
+[Files changed on disk](../GUI_WORKFLOW.md#files-changed-on-disk).
+
 Open the History Browser to review operation summaries and expandable
 node-level old/new values. Use Commit History only when you need the
 exact internal version ID for technical review.

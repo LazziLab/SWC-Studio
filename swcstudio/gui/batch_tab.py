@@ -130,6 +130,10 @@ class BatchTabWidget(QWidget):
     precheck_requested = Signal()
     # Path of a batch's flag review (``*_flag_review_*.json``) to open.
     flag_review_requested = Signal(str)
+    # A batch tool finished (or stopped) after rewriting SWC files in this
+    # folder in place. Open documents of those files are now stale: the main
+    # window reloads them, so nobody edits (and writes back) the old version.
+    source_files_changed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -428,7 +432,15 @@ class BatchTabWidget(QWidget):
     def _build_radii_page(self) -> QWidget:
         page = RadiiCleaningPanel(self, allow_loaded_swc_run=False)
         page.log_message.connect(self.log_message.emit)
+        page.log_message.connect(self._on_radii_page_message)
         return page
+
+    def _on_radii_page_message(self, text: str) -> None:
+        # The radii page reports a finished run only through its status text;
+        # a folder run rewrites every source file in place (a failed one may
+        # have rewritten some).
+        if str(text or "").startswith(("Radii cleaning completed", "Radii cleaning failed")):
+            self.source_files_changed.emit(str(getattr(self._radii_page, "_selected_folder", "") or ""))
 
     def _build_validation_page(self) -> QWidget:
         page = QWidget()
@@ -773,6 +785,9 @@ class BatchTabWidget(QWidget):
         self._set_status("\n".join(lines), self._batch_status_box)
         self._last_flag_review_path = str(review_path or "")
         self._set_batch_running(False)
+        # Before the review opens: a cell opened from it must be the
+        # relabeled file, not a tab holding its old labels.
+        self.source_files_changed.emit(str(getattr(result, "folder", "") or self._batch_input_dir))
         if review_path:
             self.flag_review_requested.emit(str(review_path))
         else:
@@ -787,6 +802,8 @@ class BatchTabWidget(QWidget):
             self._batch_status_box,
         )
         self._set_batch_running(False)
+        # Files labeled before the failure were already rewritten.
+        self.source_files_changed.emit(self._batch_input_dir)
 
     @Slot()
     def _cleanup_batch_worker_refs(self) -> None:
@@ -854,7 +871,9 @@ class BatchTabWidget(QWidget):
             out = run_batch_simplification(folder_path)
         except Exception as e:  # noqa: BLE001
             self._set_status(f"Batch simplification failed:\n{e}", self._batch_simplify_status)
+            self.source_files_changed.emit(folder_path)  # files done before the error changed
             return
+        self.source_files_changed.emit(folder_path)
 
         per_file = list(out.get("per_file", []))
         failures = list(out.get("failures", []))
@@ -903,7 +922,9 @@ class BatchTabWidget(QWidget):
             out = run_batch_index_clean(folder_path)
         except Exception as e:  # noqa: BLE001
             self._set_status(f"Batch index clean failed:\n{e}", self._batch_index_clean_status)
+            self.source_files_changed.emit(folder_path)  # files done before the error changed
             return
+        self.source_files_changed.emit(folder_path)
 
         per_file = list(out.get("per_file", []))
         failures = list(out.get("failures", []))

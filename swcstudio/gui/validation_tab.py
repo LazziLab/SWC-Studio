@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -12,19 +13,22 @@ import pandas as pd
 
 from PySide6.QtCore import QObject, QThread, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QBrush, QColor, QDesktopServices, QFont
-from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QHeaderView, QSizePolicy
+from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit, QPushButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QHeaderView, QSizePolicy
 
 from swcstudio.core.config import feature_config_path, load_feature_config
 from swcstudio.core.reporting import (
     format_validation_report_text,
     write_text_report,
 )
-from swcstudio.core.validation import _split_swc_by_soma_roots
+from swcstudio.tools.batch_processing.features.swc_splitter import split_swc_text
 from swcstudio.core.validation_catalog import CHECK_CATALOG, CHECK_ORDER, display_label_for_result, group_rows_by_category
 from swcstudio.tools.geometry_editing.features.operations import reindex_dataframe_with_map
 from swcstudio.tools.validation.features.core import run_checks_text
 from swcstudio.gui.constants import SWC_COLS
 from swcstudio.gui.font_utils import bold_font
+
+# swc_io's per-node token columns (the exact number text of each field).
+_TOKEN_COLS = ("x_str", "y_str", "z_str", "radius_str", "id_str", "parent_str")
 
 _VALIDATION_CFG_PATH = feature_config_path("validation", "default")
 _VALIDATION_CFG = load_feature_config("validation", "default", default={"checks": {}})
@@ -153,6 +157,7 @@ class ValidationTabWidget(QWidget):
 
     precheck_requested = Signal()
     report_ready = Signal(dict)
+    validation_failed = Signal(str)
     result_activated = Signal(dict)
     def __init__(self, parent=None, as_panel: bool = True):
         super().__init__(parent)
@@ -170,6 +175,13 @@ class ValidationTabWidget(QWidget):
         self._run_id = 0
         self._worker_thread: QThread | None = None
         self._worker: _ValidationWorker | None = None
+        # Every validation thread still running, current or superseded, with
+        # its worker. A superseded run is never waited for: it finishes in the
+        # background and its result is ignored (its run id is stale). Keeping
+        # the references until then stops Qt deleting a running thread.
+        self._live_runs: dict[QThread, _ValidationWorker] = {}
+        # Run id whose report (or failure) has not been delivered yet.
+        self._awaiting_run_id: int | None = None
 
         self._build_ui()
 
@@ -217,9 +229,15 @@ class ValidationTabWidget(QWidget):
         return bool(self._report)
 
     def load_swc(self, df: pd.DataFrame, filename: str, file_path: str = "", auto_run: bool = True):
-        # Invalidate any in-flight worker so its results cannot attach to a newly loaded document.
+        # The validation already running is for exactly these contents (the
+        # same tab shown again): let it finish rather than start over.
+        if self.is_running() and self._is_current_data(df, file_path):
+            return
+        # Invalidate any in-flight worker so its results cannot attach to a
+        # newly loaded document. It is not waited for: switching documents
+        # must not block the UI while a long validation finishes.
         self._run_id += 1
-        self.stop_worker(wait_ms=5000)
+        self._retire_current_worker()
         self._source_stem = Path(filename or "file").stem or "file"
         self._source_file_path = str(file_path or "")
         self._df = df.copy()
@@ -238,6 +256,11 @@ class ValidationTabWidget(QWidget):
             self.run_validation()
 
     def run_validation(self):
+        """Validate the loaded contents in the background.
+
+        Starts a fresh run; a run still going for the same widget is
+        superseded (its result is ignored), never waited for.
+        """
         if self._df is None or self._df.empty:
             return
         try:
@@ -247,46 +270,85 @@ class ValidationTabWidget(QWidget):
             return
 
     def is_running(self) -> bool:
-        return bool(self._worker_thread is not None and self._worker_thread.isRunning())
+        """True until the current run (the one whose result will be shown)
+        has delivered its report or failure."""
+        return self._awaiting_run_id is not None and self._awaiting_run_id == self._run_id
 
     def stop_worker(self, wait_ms: int = 3000):
-        if self._worker_thread is None:
-            return
-        try:
-            if self._worker_thread.isRunning():
-                self._worker_thread.quit()
-                self._worker_thread.wait(int(wait_ms))
-        except Exception:
-            pass
-        if self._worker_thread is not None and not self._worker_thread.isRunning():
-            self._cleanup_worker_refs()
-
-    def _start_validation_worker(self, swc_text: str):
-        if self.is_running():
-            return
-
+        """Drop the current run's result and wait up to ``wait_ms`` in total
+        for every validation thread to finish (used when the app closes)."""
         self._run_id += 1
-        run_id = int(self._run_id)
+        self._retire_current_worker()
+        remaining = max(0, int(wait_ms))
+        for thread in list(self._live_runs):
+            if remaining <= 0:
+                break
+            try:
+                started = time.monotonic()
+                if thread.isRunning():
+                    thread.quit()
+                    thread.wait(remaining)
+                remaining -= int((time.monotonic() - started) * 1000)
+            except Exception:  # noqa: BLE001
+                pass
 
+    def _is_current_data(self, df: pd.DataFrame, file_path: str) -> bool:
+        if self._df is None or not isinstance(df, pd.DataFrame):
+            return False
+        if str(file_path or "") != self._source_file_path:
+            return False
+        try:
+            mine = self._df.loc[:, SWC_COLS].reset_index(drop=True)
+            theirs = df.loc[:, SWC_COLS].reset_index(drop=True)
+            return bool(mine.equals(theirs))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _retire_current_worker(self):
+        """Stop tracking the current run without waiting for it to finish."""
         if self._worker_thread is not None:
             try:
-                self._worker_thread.quit()
-                self._worker_thread.wait(200)
-            except Exception:
+                self._worker_thread.quit()  # leaves once the running check returns
+            except Exception:  # noqa: BLE001
                 pass
-            if self._worker_thread is not None and not self._worker_thread.isRunning():
-                self._cleanup_worker_refs()
+        self._worker = None
+        self._worker_thread = None
+        self._awaiting_run_id = None
 
-        self._worker_thread = QThread(self)
-        self._worker = _ValidationWorker(run_id, swc_text)
-        self._worker.moveToThread(self._worker_thread)
-        self._worker_thread.started.connect(self._worker.run)
-        self._worker.finished.connect(self._on_validation_finished)
-        self._worker.failed.connect(self._on_validation_failed)
-        self._worker.finished.connect(self._worker_thread.quit)
-        self._worker.failed.connect(self._worker_thread.quit)
-        self._worker_thread.finished.connect(self._cleanup_worker_refs)
-        self._worker_thread.start()
+    def _start_validation_worker(self, swc_text: str):
+        self._run_id += 1
+        run_id = int(self._run_id)
+        self._retire_current_worker()
+        self._awaiting_run_id = run_id
+
+        thread = QThread(self)
+        worker = _ValidationWorker(run_id, swc_text)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_validation_finished)
+        worker.failed.connect(self._on_validation_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._on_thread_finished)
+        self._live_runs[thread] = worker
+        self._worker_thread = thread
+        self._worker = worker
+        self._status_label.setText("Running validation...")
+        thread.start()
+
+    @Slot()
+    def _on_thread_finished(self):
+        thread = self.sender()
+        if not isinstance(thread, QThread):
+            return
+        self._live_runs.pop(thread, None)
+        if thread is self._worker_thread:
+            self._worker = None
+            self._worker_thread = None
+            if self.is_running():
+                # The thread ended without its worker reporting back.
+                self._on_validation_failed(self._run_id, "the validation stopped without a result")
+        thread.deleteLater()
 
     @Slot()
     def _cleanup_worker_refs(self):
@@ -297,6 +359,7 @@ class ValidationTabWidget(QWidget):
     def _on_validation_finished(self, run_id: int, report_dict: dict):
         if int(run_id) != int(self._run_id):
             return
+        self._awaiting_run_id = None
         self._report = dict(report_dict)
         rows = list(self._report.get("results", []))
         rows.sort(key=self._result_sort_key)
@@ -376,7 +439,10 @@ class ValidationTabWidget(QWidget):
     def _on_validation_failed(self, run_id: int, error_text: str):
         if int(run_id) != int(self._run_id):
             return
-        _ = error_text
+        self._awaiting_run_id = None
+        message = str(error_text or "").strip() or "unknown error"
+        self._status_label.setText(f"Validation failed: {message}")
+        self.validation_failed.emit(message)
 
     def _write_report_to_path(self, out_path: str):
         if not self._report:
@@ -414,7 +480,10 @@ class ValidationTabWidget(QWidget):
         self._ensure_swc_text()
         if not self._swc_text:
             return
-        self._trees = _split_swc_by_soma_roots(self._swc_text)
+        # Guarded split: raises ValueError (duplicate node ids, a parent
+        # cycle, or trees that would not hold every node) instead of
+        # silently dropping or duplicating nodes.
+        self._trees = split_swc_text(self._swc_text)
 
     def _result_sort_key(self, row: dict) -> tuple[int, str]:
         key = str(row.get("key", ""))
@@ -425,7 +494,11 @@ class ValidationTabWidget(QWidget):
         if self._df is None or self._df.empty:
             return []
 
-        self._ensure_trees()
+        try:
+            self._ensure_trees()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Save All Trees", str(exc))
+            return []
         if not self._trees:
             return []
 
@@ -433,11 +506,28 @@ class ValidationTabWidget(QWidget):
         if not folder:
             return []
 
+        targets = [
+            os.path.join(folder, f"{self._source_stem}_tree{tidx}.swc")
+            for tidx in range(1, len(self._trees) + 1)
+        ]
+        existing = [p for p in targets if os.path.exists(p)]
+        if existing:
+            names = "\n".join(f"  {os.path.basename(p)}" for p in existing[:10])
+            more = f"\n  ... and {len(existing) - 10} more" if len(existing) > 10 else ""
+            answer = QMessageBox.question(
+                self,
+                "Save All Trees",
+                f"{len(existing)} of these files already exist in that folder:\n\n{names}{more}"
+                "\n\nReplace them?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return []
+
         try:
             saved_paths: list[str] = []
-            for tidx, (_root_id, sub_text, _node_count) in enumerate(self._trees, start=1):
-                out_name = f"{self._source_stem}_tree{tidx}.swc"
-                out_path = os.path.join(folder, out_name)
+            for out_path, (_root_id, sub_text, _node_count) in zip(targets, self._trees):
                 with open(out_path, "w", encoding="utf-8") as f:
                     f.write(sub_text)
                 saved_paths.append(out_path)
@@ -508,11 +598,23 @@ class ValidationIndexCleanWidget(QWidget):
         layout.addStretch()
 
     def set_loaded_swc(self, df: pd.DataFrame | None):
-        self._df = df.loc[:, SWC_COLS].copy() if isinstance(df, pd.DataFrame) and not df.empty else None
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            # Keep the original number text (the *_str token columns) so it
+            # moves with each node when the nodes are renumbered.
+            cols = SWC_COLS + [c for c in _TOKEN_COLS if c in df.columns]
+            self._df = df.loc[:, cols].copy()
+            self._df.attrs = dict(getattr(df, "attrs", {}) or {})
+        else:
+            self._df = None
         self._btn_apply.setEnabled(self._df is not None and not self._df.empty)
 
     def _on_apply(self):
         if self._df is None or self._df.empty:
             return
-        new_df, id_map = reindex_dataframe_with_map(self._df)
+        try:
+            new_df, id_map = reindex_dataframe_with_map(self._df)
+        except ValueError as exc:
+            # Refused (duplicate node ids, a parent cycle): nothing is changed.
+            QMessageBox.warning(self, "Index Clean", str(exc))
+            return
         self.index_clean_requested.emit(new_df, dict(id_map))

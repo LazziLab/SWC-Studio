@@ -115,6 +115,11 @@ class FlagReviewPanel(QWidget):
         self._path: Path | None = None
         self._payload: dict[str, Any] = {}
         self._records: list[dict[str, Any]] = []
+        # Indices (into _records) of the cells last selected. Previous/Next
+        # continue from them when nothing is selected any more, e.g. after
+        # Mark OK took the cell out of the "Not reviewed" list.
+        self._cursor: list[int] = []
+        self._filling = False
         self._build_ui()
         self._refresh()
 
@@ -182,16 +187,17 @@ class FlagReviewPanel(QWidget):
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(5, QHeaderView.Stretch)
         self._table.cellDoubleClicked.connect(lambda row, _col: self._on_row_double_clicked(row))
-        self._table.itemSelectionChanged.connect(self._update_step_buttons)
+        self._table.itemSelectionChanged.connect(self._on_selection_changed)
         root.addWidget(self._table, stretch=1)
 
         actions = QHBoxLayout()
         self._btn_previous = QPushButton("Previous")
-        self._btn_previous.setToolTip("Select and open the cell one row up the list.")
+        self._btn_previous.setToolTip("Select and open the cell before the current one in the list.")
         self._btn_previous.clicked.connect(lambda: self.step(-1))
         actions.addWidget(self._btn_previous)
         self._btn_next = QPushButton("Next")
-        self._btn_next.setToolTip("Select and open the cell one row down the list (the next riskiest).")
+        self._btn_next.setToolTip("Select and open the cell after the current one in the list "
+                                  "(the next riskiest).")
         self._btn_next.clicked.connect(lambda: self.step(1))
         actions.addWidget(self._btn_next)
         self._btn_open_cell = QPushButton("Open Cell")
@@ -228,6 +234,14 @@ class FlagReviewPanel(QWidget):
         except Exception as exc:  # noqa: BLE001
             self.log_message.emit(f"Could not open flag review {p}: {exc}")
             return False
+        # A new review starts at its riskiest cell: forget the previous
+        # review's selection and position (its rows point at other records).
+        self._filling = True
+        try:
+            self._table.clearSelection()
+        finally:
+            self._filling = False
+        self._cursor = []
         self._path, self._payload, self._records = p, payload, records
         share = float(payload.get("flag_budget") or 0.10)
         self._share.blockSignals(True)
@@ -281,59 +295,90 @@ class FlagReviewPanel(QWidget):
             return not rec.get("labeled")
         return True
 
+    def _risk_order(self) -> list[int]:
+        """Indices of all records, riskiest first."""
+        return sorted(range(len(self._records)), key=lambda i: _risk_key(self._records[i]))
+
+    @staticmethod
+    def _row_values(rec: dict[str, Any], risk_pos: int, share: float) -> list[tuple[str, Any]]:
+        """(text, sort key) of each column for one record."""
+        f1 = rec.get("predicted_f1")
+        stage1 = (f"{cell_class_name(rec.get('stage1_cell_type'))} ({float(rec['stage1_confidence']):.2f})"
+                  if rec.get("stage1_confidence") is not None else "")
+        rank = (f"{rec['rank_in_class']} / {rec['class_size']}"
+                if rec.get("rank_in_class") is not None else "")
+        warnings = warnings_text(rec)
+        return [
+            ("●" if rec.get("flagged") else "", risk_pos),  # position in the riskiest-first order
+            (rec.get("file", ""), rec.get("file", "").lower()),
+            (cell_class_name(rec.get("cell_type")) if rec.get("labeled") else "", rec.get("cell_type") or "~"),
+            (f"{float(f1):.3f}" if f1 is not None else "", float(f1) if f1 is not None else 9.0),
+            (rank, float(rec.get("rank_in_class") or 1e9)),
+            (reason_text(rec, share), reason_text(rec, share)),
+            (warnings, warnings or "~"),  # "~": rows without warnings sort last
+            (stage1, stage1),
+            (str(rec.get("nodes") or ""), int(rec.get("nodes") or 0)),
+            (str(rec.get("type_changes") or 0) if rec.get("labeled") else "", int(rec.get("type_changes") or 0)),
+            (REVIEW_TEXT.get(rec.get("review_status", "unreviewed"), ""), rec.get("review_status", "")),
+        ]
+
     def _fill_table(self) -> None:
         share = self._share.value() / 100.0
-        rows = sorted(self._records, key=_risk_key)
-        shown = [r for r in rows if self._visible(r)]
-        index_of = {id(r): i for i, r in enumerate(self._records)}
+        # Rows are rebuilt from scratch, so remember the selected cells (not
+        # row numbers: a marked cell can leave the list and shift the rows).
+        selected = set(self._selected_record_indices())
+        order = self._risk_order()
+        shown = [i for i in order if self._visible(self._records[i])]
+        risk_pos = {idx: pos for pos, idx in enumerate(order)}
         header = self._table.horizontalHeader()
         sort_section, sort_order = header.sortIndicatorSection(), header.sortIndicatorOrder()
-        self._table.setSortingEnabled(False)
-        self._table.setRowCount(len(shown))
-        for i, rec in enumerate(shown):
-            idx = index_of[id(rec)]
-            f1 = rec.get("predicted_f1")
-            stage1 = (f"{cell_class_name(rec.get('stage1_cell_type'))} ({float(rec['stage1_confidence']):.2f})"
-                      if rec.get("stage1_confidence") is not None else "")
-            rank = (f"{rec['rank_in_class']} / {rec['class_size']}"
-                    if rec.get("rank_in_class") is not None else "")
-            warnings = warnings_text(rec)
-            values = [
-                ("●" if rec.get("flagged") else "", i),  # i: position in the riskiest-first order
-                (rec.get("file", ""), rec.get("file", "").lower()),
-                (cell_class_name(rec.get("cell_type")) if rec.get("labeled") else "", rec.get("cell_type") or "~"),
-                (f"{float(f1):.3f}" if f1 is not None else "", float(f1) if f1 is not None else 9.0),
-                (rank, float(rec.get("rank_in_class") or 1e9)),
-                (reason_text(rec, share), reason_text(rec, share)),
-                (warnings, warnings or "~"),  # "~": rows without warnings sort last
-                (stage1, stage1),
-                (str(rec.get("nodes") or ""), int(rec.get("nodes") or 0)),
-                (str(rec.get("type_changes") or 0) if rec.get("labeled") else "", int(rec.get("type_changes") or 0)),
-                (REVIEW_TEXT.get(rec.get("review_status", "unreviewed"), ""), rec.get("review_status", "")),
-            ]
-            for col, (text, key) in enumerate(values):
-                item = _SortItem(text)
-                item.setData(Qt.UserRole, key)
-                item.setData(Qt.UserRole + 1, idx)
-                if col == 0:
-                    item.setForeground(QBrush(QColor(200, 40, 40)))
-                    item.setTextAlignment(Qt.AlignCenter)
-                if col == _WARNINGS_COL and text:
-                    item.setToolTip(text)
-                if not rec.get("labeled"):
-                    item.setForeground(QBrush(_UNLABELED_FG))
-                elif rec.get("class_mismatch"):
-                    item.setBackground(QBrush(_MISMATCH_BG))
-                elif rec.get("flagged"):
-                    item.setBackground(QBrush(_FLAGGED_BG))
-                self._table.setItem(i, col, item)
-        self._table.setSortingEnabled(True)
-        self._table.sortItems(sort_section, sort_order)
+        self._filling = True
+        try:
+            self._table.clearSelection()
+            self._table.setSortingEnabled(False)
+            self._table.setRowCount(len(shown))
+            for i, idx in enumerate(shown):
+                self._fill_row(i, idx, self._row_values(self._records[idx], risk_pos[idx], share))
+            self._table.setSortingEnabled(True)
+            self._table.sortItems(sort_section, sort_order)
+            self._reselect(selected)
+        finally:
+            self._filling = False
         # Reviews written before warnings were recorded never carry any: hide
         # the column for them rather than show it empty.
         self._table.setColumnHidden(_WARNINGS_COL, not any(warnings_text(r) for r in self._records))
         self._update_summary()
         self._update_step_buttons()
+
+    def _reselect(self, record_indices: set[int]) -> None:
+        model, selection = self._table.model(), self._table.selectionModel()
+        first = None
+        for row in range(self._table.rowCount()):
+            if self._record_index_at(row) in record_indices:
+                selection.select(model.index(row, 0), QItemSelectionModel.Select | QItemSelectionModel.Rows)
+                if first is None:
+                    first = row
+        if first is not None:
+            selection.setCurrentIndex(model.index(first, 0), QItemSelectionModel.NoUpdate)
+
+    def _fill_row(self, i: int, idx: int, values: list[tuple[str, Any]]) -> None:
+        rec = self._records[idx]
+        for col, (text, key) in enumerate(values):
+            item = _SortItem(text)
+            item.setData(Qt.UserRole, key)
+            item.setData(Qt.UserRole + 1, idx)
+            if col == 0:
+                item.setForeground(QBrush(QColor(200, 40, 40)))
+                item.setTextAlignment(Qt.AlignCenter)
+            if col == _WARNINGS_COL and text:
+                item.setToolTip(text)
+            if not rec.get("labeled"):
+                item.setForeground(QBrush(_UNLABELED_FG))
+            elif rec.get("class_mismatch"):
+                item.setBackground(QBrush(_MISMATCH_BG))
+            elif rec.get("flagged"):
+                item.setBackground(QBrush(_FLAGGED_BG))
+            self._table.setItem(i, col, item)
 
     def _update_summary(self) -> None:
         labeled = [r for r in self._records if r.get("labeled")]
@@ -353,18 +398,86 @@ class FlagReviewPanel(QWidget):
         self._summary.setText("  ·  ".join(parts))
 
     # ------------------------------------------------------------ actions
-    def _record_at(self, row: int) -> dict[str, Any] | None:
+    def _record_index_at(self, row: int) -> int | None:
         item = self._table.item(row, 0)
         if item is None:
             return None
         idx = item.data(Qt.UserRole + 1)
-        return self._records[int(idx)] if idx is not None else None
+        if idx is None or not 0 <= int(idx) < len(self._records):
+            return None
+        return int(idx)
+
+    def _record_at(self, row: int) -> dict[str, Any] | None:
+        idx = self._record_index_at(row)
+        return self._records[idx] if idx is not None else None
+
+    def _row_of_record(self, idx: int) -> int | None:
+        for row in range(self._table.rowCount()):
+            if self._record_index_at(row) == idx:
+                return row
+        return None
 
     def _selected_rows(self) -> list[int]:
         return sorted({ix.row() for ix in self._table.selectionModel().selectedRows()})
 
+    def _selected_record_indices(self) -> list[int]:
+        """Selected records, in table order."""
+        return [idx for idx in (self._record_index_at(r) for r in self._selected_rows()) if idx is not None]
+
     def _selected_records(self) -> list[dict[str, Any]]:
-        return [rec for rec in (self._record_at(r) for r in self._selected_rows()) if rec is not None]
+        return [self._records[idx] for idx in self._selected_record_indices()]
+
+    def _on_selection_changed(self) -> None:
+        if self._filling:
+            return
+        selected = self._selected_record_indices()
+        if selected:
+            self._cursor = selected
+        self._update_step_buttons()
+
+    def _candidate_paths(self, value: str) -> list[Path]:
+        """Where the file recorded as ``value`` may be.
+
+        Absolute paths are used as they are. ``swcstudio batch auto-label``
+        records paths as given on its command line, so they can be relative
+        to the folder it ran in; the review file is written inside the batch
+        folder (its recorded ``folder``), so they are resolved from there.
+        """
+        p = Path(value)
+        if p.is_absolute() or self._path is None:
+            return [p]
+        review_dir = self._path.parent
+        candidates: list[Path] = []
+        folder = str(self._payload.get("folder") or "").strip()
+        if folder:
+            folder_path = Path(folder)
+            if folder_path.is_absolute():
+                candidates.append(folder_path / p)
+            else:
+                # "cells/a.swc" recorded with folder "cells": the file is
+                # "a.swc" in that folder, which holds the review.
+                try:
+                    candidates.append(review_dir / p.relative_to(folder_path))
+                except ValueError:
+                    pass
+        candidates.append(review_dir / p)
+        candidates.append(review_dir / p.name)
+        unique: list[Path] = []
+        for c in candidates:
+            if c not in unique:
+                unique.append(c)
+        return unique
+
+    def _record_path(self, rec: dict[str, Any]) -> str | None:
+        """The labeled file of a record (its output, else its input), if found."""
+        for key in ("output_path", "input_path"):
+            value = rec.get(key)
+            if not value:
+                continue
+            for candidate in self._candidate_paths(str(value)):
+                if candidate.is_file():
+                    return str(candidate)
+        return None
 
     def _open_rows(self, rows: list[int]) -> None:
         """Ask the main window to open the cells in ``rows``, in table order."""
@@ -373,8 +486,7 @@ class FlagReviewPanel(QWidget):
             rec = self._record_at(row)
             if rec is None:
                 continue
-            path = next((str(rec[key]) for key in ("output_path", "input_path")
-                         if rec.get(key) and Path(rec[key]).is_file()), None)
+            path = self._record_path(rec)
             if path is None:
                 self.log_message.emit(f"Flag review: cannot find the file for {rec.get('file')}.")
             elif path not in paths:
@@ -389,32 +501,71 @@ class FlagReviewPanel(QWidget):
         rows = self._selected_rows()
         self._open_rows(rows if row in rows else [row])
 
-    def step(self, delta: int) -> None:
-        """Move the selection ``delta`` rows down (up if negative) and open that cell.
+    def _step_order(self) -> list[int]:
+        """Every record, shown or not, in the order Previous/Next walk.
 
-        With several rows selected, Next continues below the last of them and
-        Previous above the first. With none selected, Next starts at the top
-        of the list and Previous at the bottom.
+        That is the table's order: riskiest first unless another column was
+        clicked to sort by it. Records the filter hides keep their place, so
+        stepping on from a cell that just left the list (marked OK while
+        showing "Not reviewed") continues with the cell that followed it.
         """
-        count = self._table.rowCount()
-        if count == 0:
+        risk = self._risk_order()
+        header = self._table.horizontalHeader()
+        section, order = header.sortIndicatorSection(), header.sortIndicatorOrder()
+        descending = order == Qt.DescendingOrder
+        if not 0 < section < len(COLUMNS):
+            return list(reversed(risk)) if descending and section == 0 else risk
+        share = self._share.value() / 100.0
+        keys = {idx: self._row_values(self._records[idx], pos, share)[section][1]
+                for pos, idx in enumerate(risk)}
+        # Stable, like the table's own sort: ties keep the riskiest-first order.
+        return sorted(risk, key=lambda idx: keys[idx], reverse=descending)
+
+    def _step_target(self, delta: int) -> int | None:
+        """The record ``delta`` cells after (before, if negative) the current one.
+
+        The current cells are the selected ones (Next continues after the
+        last of them, Previous before the first); with none selected, the
+        cells last selected. With neither, Next starts at the top of the list
+        and Previous at the bottom.
+        """
+        if self._path is None or not self._records or not delta:
+            return None
+        order = self._step_order()
+        shown = [idx for idx in order if self._visible(self._records[idx])]
+        if not shown:
+            return None
+        anchors = self._selected_record_indices() or [i for i in self._cursor if 0 <= i < len(self._records)]
+        steps = abs(int(delta))
+        if not anchors:
+            pool = shown if delta > 0 else list(reversed(shown))
+            return pool[steps - 1] if len(pool) >= steps else None
+        position = {idx: pos for pos, idx in enumerate(order)}
+        if delta > 0:
+            start = max(position[a] for a in anchors)
+            after = [idx for idx in order[start + 1:] if self._visible(self._records[idx])]
+            return after[steps - 1] if len(after) >= steps else None
+        start = min(position[a] for a in anchors)
+        before = [idx for idx in order[:start] if self._visible(self._records[idx])]
+        return before[-steps] if len(before) >= steps else None
+
+    def step(self, delta: int) -> None:
+        """Select and open the cell ``delta`` places after (before, if
+        negative) the current one; see ``_step_target``."""
+        target = self._step_target(delta)
+        if target is None:
             return
-        rows = self._selected_rows()
-        if rows:
-            target = (rows[-1] if delta > 0 else rows[0]) + int(delta)
-        else:
-            target = 0 if delta > 0 else count - 1
-        if not 0 <= target < count:
+        row = self._row_of_record(target)
+        if row is None:
             return
-        self._table.setCurrentCell(target, 0, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
-        self._table.scrollToItem(self._table.item(target, 0))
-        self._open_rows([target])
+        self._table.setCurrentCell(row, 0, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+        self._table.scrollToItem(self._table.item(row, 0))
+        self._cursor = [target]
+        self._open_rows([row])
 
     def _update_step_buttons(self) -> None:
-        count = self._table.rowCount() if self._path is not None else 0
-        rows = self._selected_rows() if count else []
-        self._btn_previous.setEnabled(count > 0 and (not rows or rows[0] > 0))
-        self._btn_next.setEnabled(count > 0 and (not rows or rows[-1] < count - 1))
+        self._btn_previous.setEnabled(self._step_target(-1) is not None)
+        self._btn_next.setEnabled(self._step_target(1) is not None)
 
     def _mark_selected(self, status: str) -> None:
         recs = [r for r in self._selected_records() if r.get("labeled")]

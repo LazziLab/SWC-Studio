@@ -101,6 +101,13 @@ class OpenDocumentsTests(unittest.TestCase):
             # Recent Files goes through the same path.
             window._recent_menu.actions()[-1].trigger()
             assert len(window._documents) == 2, len(window._documents)
+            # A spelling the path text cannot match (a hard link here; on macOS
+            # a different letter case) is still the same file: same tab.
+            alias = TMP / 'alias_of_a.swc'
+            os.link(a, alias)
+            window._load_swc(str(alias))
+            assert tab_names(window) == ['a.swc', 'b.swc'], tab_names(window)
+            assert current_name(window) == 'a.swc'
         """)
 
     def test_multi_open_opens_each_file_and_shows_the_first(self) -> None:
@@ -228,10 +235,11 @@ class FlagReviewNavigationTests(unittest.TestCase):
             assert window._canvas_tabs.count() == 3
 
             # Open Cell opens every selected row, each in its own (de-duplicated) tab.
+            # (Loading a review starts with nothing selected.)
             write_swc('d.swc')
             records = list(panel._records) + [rec('d.swc', 0.95)]
             panel.load(write_review(records, 'y_flag_review_1.json'))
-            table.clearSelection()
+            assert table.selectionModel().selectedRows() == []
             for row in (1, 3):
                 table.selectionModel().select(table.model().index(row, 0),
                                               QItemSelectionModel.Select | QItemSelectionModel.Rows)
@@ -243,6 +251,111 @@ class FlagReviewNavigationTests(unittest.TestCase):
             col = COLUMNS.index('Warnings')
             assert not table.isColumnHidden(col)
             assert [table.item(r, col).text() for r in range(4)] == ['', 'no axon labeled', '', '']
+        """)
+
+    def test_next_after_mark_ok_in_not_reviewed_list_skips_no_cell(self) -> None:
+        _run_gui_script(self, self._REVIEW, """
+            from PySide6.QtCore import Qt
+            from swcstudio.gui.flag_review_window import FILTERS
+            review = write_review([rec('a.swc', 0.40, flagged=True), rec('b.swc', 0.50),
+                                   rec('c.swc', 0.60), rec('d.swc', 0.70)])
+            assert panel.load(review)
+            panel._filter.setCurrentIndex([v for _t, v in FILTERS].index('unreviewed'))
+            assert table_files() == ['a.swc', 'b.swc', 'c.swc', 'd.swc'], table_files()
+
+            panel._btn_next.click()
+            assert current_name(window) == 'a.swc'
+            panel._btn_mark_ok.click()
+            # a.swc left the list. Nothing is selected now: the row that moved
+            # up into its place (b.swc) was never opened, so it must not be.
+            assert table_files() == ['b.swc', 'c.swc', 'd.swc'], table_files()
+            assert panel._selected_records() == [], [r['file'] for r in panel._selected_records()]
+            panel._btn_mark_ok.click()  # marks nothing
+            assert [r['review_status'] for r in panel._records] == ['ok', 'unreviewed', 'unreviewed', 'unreviewed']
+            # Next continues with the cell after the one just marked.
+            assert panel._btn_next.isEnabled()
+            panel._btn_next.click()
+            assert current_name(window) == 'b.swc', current_name(window)
+            assert [r['file'] for r in panel._selected_records()] == ['b.swc']
+            # Nothing before b.swc is left in this list.
+            assert not panel._btn_previous.isEnabled()
+            panel._btn_mark_corrected.click()
+            panel._btn_next.click()
+            assert current_name(window) == 'c.swc', current_name(window)
+            saved = json.loads(Path(review).read_text(encoding='utf-8'))
+            assert [r['review_status'] for r in saved['records']] == ['ok', 'corrected', 'unreviewed', 'unreviewed']
+
+            # Sorted by another column, Next follows the table's order.
+            panel._filter.setCurrentIndex(0)  # all cells
+            table.horizontalHeader().setSortIndicator(3, Qt.DescendingOrder)  # Predicted F1, highest first
+            assert table_files() == ['d.swc', 'c.swc', 'b.swc', 'a.swc'], table_files()
+            assert [r['file'] for r in panel._selected_records()] == ['c.swc']
+            panel._btn_next.click()
+            assert current_name(window) == 'b.swc', current_name(window)
+        """)
+
+    def test_loading_a_review_starts_at_its_riskiest_cell(self) -> None:
+        _run_gui_script(self, self._REVIEW, """
+            first = write_review([rec('a.swc', 0.40), rec('b.swc', 0.50), rec('c.swc', 0.60)])
+            assert panel.load(first)
+            panel._btn_next.click()
+            panel._btn_next.click()
+            assert current_name(window) == 'b.swc'
+            second = write_review([rec('p.swc', 0.30, flagged=True), rec('q.swc', 0.55),
+                                   rec('r.swc', 0.80)], 'second_flag_review_1.json')
+            assert panel.load(second)
+            assert panel._selected_records() == []
+            panel._btn_next.click()
+            assert current_name(window) == 'p.swc', current_name(window)
+        """)
+
+    def test_relative_paths_from_cli_reviews_resolve_against_the_review(self) -> None:
+        _run_gui_script(self, self._REVIEW, """
+            # `swcstudio batch auto-label cells` run from TMP records the folder
+            # and paths as typed, and writes the review inside the folder. The
+            # GUI runs from another directory, so they only resolve from there.
+            cells = TMP / 'cells'
+            cells.mkdir()
+            (cells / 'a.swc').write_text(Path(write_swc('a.swc', types=(1, 2, 2))).read_text(), encoding='utf-8')
+            (cells / 'b.swc').write_text(Path(write_swc('b.swc', types=(1, 4, 4))).read_text(), encoding='utf-8')
+            (TMP / 'a.swc').unlink()
+            (TMP / 'b.swc').unlink()
+            assert Path.cwd() != TMP
+            def cli_rec(name, f1):
+                return {'file': name, 'input_path': 'cells/' + name, 'output_path': 'cells/' + name,
+                        'labeled': True, 'cell_type': 'pyramidal', 'predicted_f1': f1,
+                        'flagged': False, 'class_mismatch': False, 'review_status': 'unreviewed'}
+            review = cells / 'cells_flag_review_1.json'
+            review.write_text(json.dumps({
+                'kind': 'swcstudio_flag_review', 'folder': 'cells', 'timestamp': '1',
+                'flag_budget': 0.10, 'records': [cli_rec('a.swc', 0.4), cli_rec('b.swc', 0.6)],
+            }), encoding='utf-8')
+            assert panel.load(review)
+            panel._btn_next.click()
+            panel._btn_next.click()
+            assert tab_names(window) == ['a.swc', 'b.swc'], tab_names(window)
+            assert [Path(d.file_path) for d in window._documents.values()] == [cells / 'a.swc', cells / 'b.swc']
+
+            # Plain relative names (folder ".") resolve next to the review too.
+            review2 = cells / 'dot_flag_review_1.json'
+            review2.write_text(json.dumps({
+                'kind': 'swcstudio_flag_review', 'folder': '.', 'timestamp': '1', 'flag_budget': 0.10,
+                'records': [dict(cli_rec('a.swc', 0.4), input_path='a.swc', output_path=None)],
+            }), encoding='utf-8')
+            assert panel.load(review2)
+            assert panel._record_path(panel._records[0]) == str(cells / 'a.swc')
+        """)
+
+    def test_open_cell_from_batch_shows_it_while_a_validation_runs(self) -> None:
+        _run_gui_script(self, self._REVIEW, """
+            review = write_review([rec('a.swc', 0.4), rec('b.swc', 0.6)])
+            window._activate_feature('batch')
+            window._open_flag_review(review)
+            window._validation_tab.is_running = lambda: True  # e.g. still validating a reloaded file
+            panel._btn_next.click()
+            assert tab_names(window) == ['a.swc'], tab_names(window)
+            assert window._active_tool == 'morphology_editing', window._active_tool
+            assert window._canvas_stack.currentWidget() is window._canvas_tabs
         """)
 
     def test_review_without_warnings_hides_the_column(self) -> None:

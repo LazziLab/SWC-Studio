@@ -72,7 +72,12 @@ That automatic validation step is why the GUI can immediately present an issue-o
   first switch to them.
 - Opening a file that is already open (from `File -> Open`,
   `Recent Files` or the `Flag Review` window) switches to its tab
-  instead of opening it twice.
+  instead of opening it twice. Paths that name the same file in another
+  spelling (a different letter case on macOS, a link) count as the same
+  file.
+- Validation runs in the background. Switching tabs while it runs does
+  not wait for it: the `Issues` panel says `Running validation...` until
+  the shown file's issues are ready, and a validation that fails says so.
 - Choosing more than 10 new files at once asks for confirmation first:
   every tab has its own 3D views and dendrogram, so many open files use
   a lot of memory.
@@ -153,11 +158,18 @@ Auto-labeling uses the SWC auto-labeler, version 1.0.0.
   file, so a review can be resumed. `Window -> Show/Hide Flag Review`
   shows or hides the window.
 - `Open Cell` (or a double-click) opens every selected cell, each in
-  its own tab. `Previous` and `Next` move the selection one row up or
-  down the list and open that cell, so you can step through the
-  riskiest cells without going back to the list. Cells opened from the
-  review are shown in `Morphology Editing` when Batch Processing is
-  active.
+  its own tab. `Previous` and `Next` open the cell before or after the
+  current one in the list (riskiest first, unless you sorted by another
+  column), so you can step through the riskiest cells without going back
+  to the list. With `Show: Not reviewed`, a cell you mark leaves the
+  list and nothing stays selected; `Next` then opens the cell that came
+  after it, so no cell is skipped or marked unseen. Loading a review
+  starts again at its riskiest cell. Cells opened from the review are
+  shown in `Morphology Editing` when Batch Processing is active, also
+  while a validation is still running.
+- Reviews written by `swcstudio batch auto-label` can hold paths
+  relative to the folder the command ran in; they are looked up from
+  the review file's folder (the batch folder).
 - A `Warnings` column shows a cell's warnings (for example
   `no axon labeled`) when the review records any.
 - `Window -> Show/Hide Auto Typing Guide` shows a short description of
@@ -186,6 +198,42 @@ See [Custom Types and Labels](documentation/custom-types-and-labels.md) for the 
 
 The GUI writes tracked morphology edits directly back to the source SWC
 and records the operation history in the encrypted sidecar archive.
+
+### Files changed on disk
+
+While a file is open, something else can write it: a batch run in the
+GUI or on the command line (Auto Label Editing relabels every file in
+its folder in place), or another program. The GUI never writes an older
+copy back over such changes without asking:
+
+- When a batch run finishes, every open tab whose file it changed is
+  reloaded. A tab that also has changes of its own (for example after
+  `Undo`) keeps them; it is marked `[changed on disk]` and listed in a
+  warning.
+- Opening a file again (`File -> Open`, `Recent Files`, `Flag Review`)
+  or switching to its tab reloads it the same way; if the tab has
+  changes of its own, opening it again asks: `Reload from Disk` or
+  `Keep My Version`.
+- If an edit or a save would replace a file that changed on disk since
+  the tab last read or wrote it, the GUI asks first: `Reload from Disk`
+  (discard the tab's version and the edit), `Overwrite File`, or
+  `Cancel` (nothing is written and the edit is not applied).
+- `File -> Reload from Disk` shows the current file as it is on disk.
+- `Save As` (and `Export`) refuse a file that is open in another tab;
+  close that tab first or choose another name.
+- An Auto Label Editing result for a file that was closed or reloaded
+  while the labeler ran is discarded, not written.
+
+Label and radius edits (manual labeling, Auto Label Editing, radii
+edits) rewrite only the changed fields of the file, as the command-line
+auto-label does: comment lines stay where they are, and text after a
+`#` on a node line, columns after the seventh, line endings and a UTF-8
+byte-order mark are kept (the `# @PROV` pointer lines go above them).
+Edits that change ids, parents, coordinates or
+the set of nodes (Index Clean, geometry edits, Simplification) write the
+file from the edited table: the original number text is kept for every
+unchanged value, but comment lines move to the top and extra columns and
+inline comments are not kept.
 
 Important current behavior:
 
