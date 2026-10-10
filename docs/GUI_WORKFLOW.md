@@ -65,6 +65,29 @@ When you open an SWC file:
 
 That automatic validation step is why the GUI can immediately present an issue-oriented workflow after a file is loaded.
 
+### Working with several files
+
+- `File -> Open` accepts several files at once; each opens in its own
+  tab and the first one is shown. The other tabs are validated when you
+  first switch to them.
+- Opening a file that is already open (from `File -> Open`,
+  `Recent Files` or the `Flag Review` window) switches to its tab
+  instead of opening it twice.
+- Choosing more than 10 new files at once asks for confirmation first:
+  every tab has its own 3D views and dendrogram, so many open files use
+  a lot of memory.
+- `Window -> Next File` and `Window -> Previous File`
+  (`Ctrl+Tab` / `Ctrl+Shift+Tab`) move between the open tabs.
+
+### Node-type colours
+
+A small legend in the corner of the 3D view lists the colour of each
+node type in the current file: soma (green), axon (blue), basal
+dendrite (red), apical dendrite (pink), undefined (grey), and any
+custom types with their registered names and colours. It updates when
+the file's types change, for example after auto-labeling.
+`View -> Show Node-Type Legend` turns it off and on.
+
 ## Issue-driven repair flow
 
 The intended desktop loop is:
@@ -129,6 +152,14 @@ Auto-labeling uses the SWC auto-labeler, version 1.0.0.
   and mark it `OK` or `Corrected`. The marks are saved into the review
   file, so a review can be resumed. `Window -> Show/Hide Flag Review`
   shows or hides the window.
+- `Open Cell` (or a double-click) opens every selected cell, each in
+  its own tab. `Previous` and `Next` move the selection one row up or
+  down the list and open that cell, so you can step through the
+  riskiest cells without going back to the list. Cells opened from the
+  review are shown in `Morphology Editing` when Batch Processing is
+  active.
+- A `Warnings` column shows a cell's warnings (for example
+  `no axon labeled`) when the review records any.
 - `Window -> Show/Hide Auto Typing Guide` shows a short description of
   the labeling stages.
 - `Help -> About` shows the app, models, and auto-labeler versions.

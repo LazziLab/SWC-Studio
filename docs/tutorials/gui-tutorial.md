@@ -16,13 +16,18 @@ swcstudio-gui
 
 ## Step 1: Open a file
 
-Open an SWC file from the `File` menu.
+Open an SWC file from the `File` menu. You can select several files at
+once; each opens in its own tab. `Ctrl+Tab` and `Ctrl+Shift+Tab`
+(`Window -> Next File` / `Previous File`) move between them.
 
 After loading:
 
 - the file appears in the central workspace
 - the left-side `Issues` and `SWC File` panels are populated for the active document
 - validation is triggered automatically for a normal editable document when no prior validation report exists
+- a legend in the corner of the 3D view shows the colour of each node
+  type in the file (for example, apical dendrites are pink, axons blue);
+  `View -> Show Node-Type Legend` hides it
 
 ## Step 2: Review the issue list
 

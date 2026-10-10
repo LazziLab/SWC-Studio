@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from PySide6.QtCore import QEvent, QRect, QSize, QThread, Qt, Signal, Slot
-from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QFontMetrics
+from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QFontMetrics, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -157,6 +157,20 @@ def _copy_swc_metadata(dst: pd.DataFrame, src: pd.DataFrame | None) -> pd.DataFr
             if key not in dst.attrs or not dst.attrs.get(key):
                 dst.attrs[key] = value
     return dst
+
+
+# Opening more new files than this at once asks first: every tab builds its own
+# 3D views, projections and dendrogram, so many tabs use a lot of memory.
+_MANY_FILES_CONFIRM = 10
+
+
+def _path_key(path: str | Path) -> str:
+    """Comparable form of a file path: resolved, absolute, case-folded on Windows."""
+    try:
+        resolved = str(Path(path).resolve())
+    except Exception:
+        resolved = os.path.abspath(str(path))
+    return os.path.normcase(resolved)
 
 
 def _suggest_closed_output_path(base: str | Path, *, timestamp: str | None = None) -> Path:
@@ -376,6 +390,7 @@ class SWCMainWindow(QMainWindow):
         self._batch_has_results: bool = False
         self._closing_app: bool = False
         self._runtime_log_lines: list[str] = []
+        self._type_legend_visible: bool = True
 
         # Auto-label single-file worker state. Run on a QThread so the
         # GUI stays responsive during the (~1-second) inference.
@@ -603,7 +618,7 @@ class SWCMainWindow(QMainWindow):
         self._make_panel_freely_resizable(self._flag_review_dock)
         self.addDockWidget(Qt.BottomDockWidgetArea, self._flag_review_dock)
         self._flag_review_dock.hide()
-        self._flag_review_panel.open_file_requested.connect(self._load_swc)
+        self._flag_review_panel.open_files_requested.connect(self._on_flag_review_open_requested)
         self._flag_review_panel.log_message.connect(lambda msg: self._append_log(msg, "FLAG"))
         self._batch_tab.flag_review_requested.connect(self._open_flag_review)
 
@@ -836,6 +851,13 @@ class SWCMainWindow(QMainWindow):
         cam_side_action.triggered.connect(lambda: self._set_camera("side"))
         view_menu.addAction(cam_side_action)
 
+        view_menu.addSeparator()
+        self._type_legend_action = QAction("Show Node-Type Legend", self)
+        self._type_legend_action.setCheckable(True)
+        self._type_legend_action.setChecked(self._type_legend_visible)
+        self._type_legend_action.toggled.connect(self._set_type_legend_visible)
+        view_menu.addAction(self._type_legend_action)
+
         # Window
         window_menu = menu.addMenu("Window")
         reset_layout_action = QAction("Reset Layout", self)
@@ -871,6 +893,19 @@ class SWCMainWindow(QMainWindow):
             lambda: self._flag_review_dock.setVisible(not self._flag_review_dock.isVisible())
         )
         window_menu.addAction(show_flag_review_action)
+
+        window_menu.addSeparator()
+        # Standard "next/previous child window" keys: Ctrl+Tab / Ctrl+Shift+Tab
+        # on Windows and Linux, the platform equivalent on macOS.
+        self._next_document_action = QAction("Next File", self)
+        self._next_document_action.setShortcuts(QKeySequence.NextChild)
+        self._next_document_action.triggered.connect(lambda: self._cycle_document(1))
+        window_menu.addAction(self._next_document_action)
+
+        self._previous_document_action = QAction("Previous File", self)
+        self._previous_document_action.setShortcuts(QKeySequence.PreviousChild)
+        self._previous_document_action.triggered.connect(lambda: self._cycle_document(-1))
+        window_menu.addAction(self._previous_document_action)
 
         # History (provenance) - see PROVENANCE_SPEC.md for the full surface.
         history_menu = menu.addMenu("History")
@@ -3109,18 +3144,93 @@ class SWCMainWindow(QMainWindow):
         )
 
     def _on_open(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open SWC file", "", "SWC Files (*.swc);;All Files (*)"
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Open SWC files", "", "SWC Files (*.swc);;All Files (*)"
         )
-        if path:
-            self._load_swc(path)
+        if paths:
+            self._open_paths(paths)
 
-    def _load_swc(self, path: str):
+    def _open_paths(self, paths: list[str]) -> None:
+        """Open several SWC files, each in its own tab, and show the first.
+
+        Tabs are added without making each one current, so validation runs
+        only for the file that ends up shown (the others validate when their
+        tab is first selected). Files that are already open are not opened
+        again.
+        """
+        paths = [str(p) for p in (paths or []) if str(p or "").strip()]
+        if not paths:
+            return
+        new_keys = {_path_key(p) for p in paths if self._find_open_document(p) is None}
+        if len(new_keys) > _MANY_FILES_CONFIRM:
+            answer = QMessageBox.question(
+                self,
+                "Open Files",
+                f"Open {len(new_keys)} files?\n\n"
+                "Each file opens in its own tab with its own 3D views and dendrogram, "
+                "so many open files use a lot of memory.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                self._append_log(f"Open cancelled ({len(new_keys)} files selected).", "INFO")
+                return
+        first_editor = None
+        for path in paths:
+            editor = self._load_swc(path, activate=len(paths) == 1)
+            if first_editor is None and editor is not None:
+                first_editor = editor
+        if first_editor is not None:
+            self._show_document(first_editor)
+
+    def _find_open_document(self, path: str | Path) -> _DocumentState | None:
+        """The open (non-preview) document for ``path``, if there is one."""
+        key = _path_key(path)
+        for doc in self._documents.values():
+            if doc.is_preview or not doc.file_path:
+                continue
+            if _path_key(doc.file_path) == key:
+                return doc
+        return None
+
+    def _show_document(self, editor: EditorTab) -> None:
+        """Bring an open document forward: select its tab or raise its window."""
+        float_win = self._detached_windows.get(editor)
+        if float_win is not None:
+            float_win.show()
+            float_win.raise_()
+            float_win.activateWindow()
+            return
+        idx = self._canvas_tabs.indexOf(editor)
+        if idx >= 0:
+            self._canvas_tabs.setCurrentIndex(idx)
+
+    def _cycle_document(self, step: int) -> None:
+        """Select the next (step=1) or previous (step=-1) document tab, wrapping around."""
+        count = self._canvas_tabs.count()
+        if count < 2:
+            return
+        current = max(0, self._canvas_tabs.currentIndex())
+        self._canvas_tabs.setCurrentIndex((current + int(step)) % count)
+
+    def _load_swc(self, path: str, *, activate: bool = True) -> EditorTab | None:
+        """Open ``path`` in a new tab and return its editor.
+
+        If the file is already open, its existing tab is used instead (and
+        shown when ``activate``), so no entry point opens a file twice.
+        Returns None if the file could not be loaded.
+        """
+        existing = self._find_open_document(path)
+        if existing is not None:
+            if activate:
+                self._show_document(existing.editor)
+            self._append_log(f"{existing.filename} is already open.", "INFO")
+            return existing.editor
         try:
             df = parse_swc_text_preserve_tokens(Path(path).read_text(encoding="utf-8", errors="ignore"))
             if df.empty:
                 self._append_log(f"Empty file: {path} contains no data rows.", "WARN")
-                return
+                return None
 
             for col in ("id", "type", "parent"):
                 df[col] = df[col].astype(int)
@@ -3129,6 +3239,7 @@ class SWCMainWindow(QMainWindow):
             editor = EditorTab()
             self._connect_editor_signals(editor)
             controls = editor.take_dendrogram_controls_panel()
+            editor.set_type_legend_visible(self._type_legend_visible)
             editor.load_swc(df.loc[:, SWC_COLS].copy(), filename)
 
             doc = _DocumentState(
@@ -3143,7 +3254,9 @@ class SWCMainWindow(QMainWindow):
             self._start_morphology_session(doc)
 
             idx = self._canvas_tabs.addTab(editor, filename)
-            self._canvas_tabs.setCurrentIndex(idx)
+            self._canvas_tabs.setTabToolTip(idx, str(path))
+            if activate:
+                self._canvas_tabs.setCurrentIndex(idx)
 
             self._update_recent_files(path)
 
@@ -3158,8 +3271,10 @@ class SWCMainWindow(QMainWindow):
                 "INFO",
             )
             self.swc_loaded.emit(df.loc[:, SWC_COLS].copy(), filename)
+            return editor
         except Exception as e:
             self._append_log(f"Error loading SWC: {e}", "ERROR")
+            return None
 
     def _on_save(self):
         doc = self._active_document()
@@ -3195,6 +3310,7 @@ class SWCMainWindow(QMainWindow):
         tab_idx = self._canvas_tabs.indexOf(doc.editor)
         if tab_idx >= 0:
             self._canvas_tabs.setTabText(tab_idx, doc.filename)
+            self._canvas_tabs.setTabToolTip(tab_idx, doc.file_path)
         self._sync_from_active_document(auto_run_validation=False)
         self._after_document_write(doc, path, action_name="Save As")
         self._append_log(f"Saved As {path}", "INFO")
@@ -3551,6 +3667,20 @@ class SWCMainWindow(QMainWindow):
             return
         self._flag_review_dock.show()
         self._flag_review_dock.raise_()
+
+    def _on_flag_review_open_requested(self, paths: list[str]) -> None:
+        """Open cells chosen in the Flag Review window."""
+        # Batch Processing shows its own canvas instead of the document tabs,
+        # and a review usually starts right after a batch: switch to label
+        # editing so the opened cell is actually on screen.
+        if self._active_tool == "batch":
+            self._activate_feature("morphology_editing")
+        self._open_paths(list(paths or []))
+
+    def _set_type_legend_visible(self, visible: bool) -> None:
+        self._type_legend_visible = bool(visible)
+        for doc in self._documents.values():
+            doc.editor.set_type_legend_visible(self._type_legend_visible)
 
     def _reset_layout(self):
         self._data_dock.show()
@@ -4975,7 +5105,8 @@ class SWCMainWindow(QMainWindow):
             "1) Top menu row: File/Edit/View/Window/Help dropdown menus.\n"
             "2) Tools bar: choose a tool, then choose its feature row under it.\n"
             "3) Issue Navigator and Inspector are dock windows (close, float, resize, move).\n"
-            "4) You can open multiple SWC files as canvas tabs.\n"
+            "4) You can open multiple SWC files as canvas tabs (select several in File -> Open); "
+            "Window -> Next File / Previous File (Ctrl+Tab / Ctrl+Shift+Tab) moves between them.\n"
             "5) Drag a canvas tab outside the tab bar to detach it into a floating window.\n"
             "6) Closing a SWC tab/window always asks for confirmation; edited SWC copies are only written when you confirm the close-save dialog.\n"
             "7) Opening an SWC runs checks and populates the Issue Navigator automatically.\n"
@@ -4986,12 +5117,19 @@ class SWCMainWindow(QMainWindow):
         self._append_log(text, "HELP")
 
     def _show_shortcuts(self):
+        next_keys = QKeySequence(QKeySequence.NextChild).toString(QKeySequence.NativeText)
+        # Qt names Shift+Tab "Backtab"; users know it as Shift+Tab.
+        previous_keys = (
+            QKeySequence(QKeySequence.PreviousChild).toString(QKeySequence.NativeText).replace("Backtab", "Tab")
+        )
         text = (
-            "Ctrl+O: Open\n"
+            "Ctrl+O: Open (select several files to open them all)\n"
             "Ctrl+S: Save\n"
             "Ctrl+Shift+S: Save As\n"
             "Ctrl+Z: Undo\n"
-            "Ctrl+Shift+Z: Redo"
+            "Ctrl+Shift+Z: Redo\n"
+            f"{next_keys}: Next open file\n"
+            f"{previous_keys}: Previous open file"
         )
         self._show_help_text_dialog("Shortcuts", text)
         self._append_log(text, "HELP")

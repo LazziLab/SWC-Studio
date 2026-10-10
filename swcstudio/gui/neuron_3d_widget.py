@@ -1,5 +1,7 @@
 """3D neuron visualization widget using VisPy."""
 
+import html
+
 import numpy as np
 import pandas as pd
 
@@ -14,7 +16,7 @@ use_app("pyside6")
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QRadioButton, QButtonGroup, QLabel, QGridLayout
 from PySide6.QtCore import Qt, Signal
 
-from .constants import color_for_type, label_for_type, SWC_COLS
+from .constants import color_for_type, label_for_type, type_legend_entries, SWC_COLS
 
 # Number of facets around each frustum cross-section
 _N_FACETS = 8
@@ -95,6 +97,8 @@ class Neuron3DWidget(QWidget):
         self._geometry_visibility_mode: str = "show"
         self._highlight_marker = None
         self._issue_markers = None
+        self._type_legend_enabled = True
+        self._type_legend_entries: list[tuple[int, str, str]] = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -150,6 +154,24 @@ class Neuron3DWidget(QWidget):
             "}"
         )
         canvas_layout.addWidget(self._node_overlay, 0, 0, alignment=Qt.AlignTop | Qt.AlignLeft)
+
+        # Colour key for the node types in this file (View -> Show Node-Type
+        # Legend). It lets mouse events through so the corner stays usable.
+        self._type_legend = QLabel("")
+        self._type_legend.setTextFormat(Qt.RichText)
+        self._type_legend.setVisible(False)
+        self._type_legend.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._type_legend.setStyleSheet(
+            "QLabel {"
+            " background: rgba(255,255,255,220);"
+            " border: 1px solid #d8e0eb;"
+            " border-radius: 8px;"
+            " padding: 4px 8px;"
+            " color: #132238;"
+            " font-size: 11px;"
+            "}"
+        )
+        canvas_layout.addWidget(self._type_legend, 0, 0, alignment=Qt.AlignTop | Qt.AlignRight)
         layout.addWidget(canvas_host)
 
     # --------------------------------------------------------- Public API
@@ -160,6 +182,7 @@ class Neuron3DWidget(QWidget):
         self._issue_marker_signature = ()
         self._selectable_node_ids = None
         self._draw()
+        self._update_type_legend()
 
     def refresh(self, df: pd.DataFrame):
         self._df = df.copy()
@@ -168,6 +191,16 @@ class Neuron3DWidget(QWidget):
         self._issue_marker_signature = ()
         self._selectable_node_ids = None
         self._draw()
+        self._update_type_legend()
+
+    def set_type_legend_visible(self, visible: bool):
+        """Show or hide the node-type colour legend."""
+        self._type_legend_enabled = bool(visible)
+        self._type_legend.setVisible(self._type_legend_enabled and bool(self._type_legend_entries))
+
+    def type_legend_entries(self) -> list[tuple[int, str, str]]:
+        """The ``(type id, label, colour)`` rows the legend currently lists."""
+        return list(self._type_legend_entries)
 
     def set_render_mode(self, mode_id: int):
         """Set rendering mode programmatically."""
@@ -398,6 +431,20 @@ class Neuron3DWidget(QWidget):
             f"Radius: {float(node['radius']):.5g}"
         )
         self._node_overlay.setVisible(True)
+
+    def _update_type_legend(self):
+        """List the colour of each node type present in the current file."""
+        if self._df is None or self._df.empty or "type" not in self._df.columns:
+            entries = []
+        else:
+            entries = type_legend_entries(pd.unique(self._df["type"]))
+        self._type_legend_entries = entries
+        self._type_legend.setText("<br>".join(
+            f"<span style='color:{color}; font-size:13px;'>&#9632;</span>&nbsp;"
+            f"{html.escape(label)} ({type_id})"
+            for type_id, label, color in entries
+        ))
+        self._type_legend.setVisible(self._type_legend_enabled and bool(entries))
 
     def _draw_issue_markers(self):
         if self._issue_markers is not None:

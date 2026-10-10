@@ -380,6 +380,15 @@ class EditorTab(QWidget):
     def set_edit_history_state(self, can_undo: bool, can_redo: bool):
         self._dendro.set_history_state(can_undo, can_redo)
 
+    def set_type_legend_visible(self, visible: bool):
+        self._view3d_canvas.set_type_legend_visible(visible)
+        self._view3d_dendro.set_type_legend_visible(visible)
+        self._view3d_visual.set_type_legend_visible(visible)
+
+    def type_legend_entries(self) -> list[tuple[int, str, str]]:
+        """The ``(type id, label, colour)`` rows of the node-type legend."""
+        return self._view3d_canvas.type_legend_entries()
+
     def set_issue_markers(self, issues: list[dict]):
         signature = tuple(
             tuple(sorted(int(node_id) for node_id in issue.get("node_ids", [])))

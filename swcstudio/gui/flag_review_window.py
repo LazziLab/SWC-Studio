@@ -4,8 +4,9 @@ A batch run writes ``*_flag_review_*.json`` (and a CSV copy) with one record per
 file: its cell class, the quality flag's predicted per-cell F1, its rank within
 its class, and whether it is flagged. This panel lists those records riskiest
 first. The share of each class flagged can be changed here; double-clicking a
-cell opens it for review, and the review marks (OK, corrected) are saved back
-into the same file so a review can be resumed later.
+cell (or Open Cell) opens the selected cells for review, Previous / Next step
+through the list one cell at a time, and the review marks (OK, corrected) are
+saved back into the same file so a review can be resumed later.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QItemSelectionModel, Qt, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -33,8 +34,9 @@ from PySide6.QtWidgets import (
 
 from swcstudio.core.auto_typing import apply_flag_budget, cell_class_name, write_flag_review
 
-COLUMNS = ("Flag", "File", "Class", "Predicted F1", "Rank", "Reason", "Stage 1", "Nodes",
-           "Changes", "Review")
+COLUMNS = ("Flag", "File", "Class", "Predicted F1", "Rank", "Reason", "Warnings", "Stage 1",
+           "Nodes", "Changes", "Review")
+_WARNINGS_COL = COLUMNS.index("Warnings")
 FILTERS = (
     ("All cells", "all"),
     ("Flagged", "flagged"),
@@ -86,10 +88,26 @@ def reason_text(rec: dict[str, Any], share: float) -> str:
     return ""
 
 
+def warnings_text(rec: dict[str, Any]) -> str:
+    """A record's warnings (e.g. "no axon labeled") as one line; "" if it has none.
+
+    Reviews written before warnings were recorded have no ``warnings`` key.
+    """
+    warnings = rec.get("warnings")
+    if not warnings:
+        return ""
+    if isinstance(warnings, str):
+        return warnings.strip()
+    try:
+        return "; ".join(str(w).strip() for w in warnings if str(w).strip())
+    except TypeError:
+        return str(warnings)
+
+
 class FlagReviewPanel(QWidget):
     """The Flag Review window's content; the main window hosts it in a dock."""
 
-    open_file_requested = Signal(str)
+    open_files_requested = Signal(list)  # list[str]: SWC paths to open, one tab each
     log_message = Signal(str)
 
     def __init__(self, parent=None):
@@ -163,12 +181,22 @@ class FlagReviewPanel(QWidget):
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(5, QHeaderView.Stretch)
-        self._table.cellDoubleClicked.connect(lambda row, _col: self._open_row(row))
+        self._table.cellDoubleClicked.connect(lambda row, _col: self._on_row_double_clicked(row))
+        self._table.itemSelectionChanged.connect(self._update_step_buttons)
         root.addWidget(self._table, stretch=1)
 
         actions = QHBoxLayout()
+        self._btn_previous = QPushButton("Previous")
+        self._btn_previous.setToolTip("Select and open the cell one row up the list.")
+        self._btn_previous.clicked.connect(lambda: self.step(-1))
+        actions.addWidget(self._btn_previous)
+        self._btn_next = QPushButton("Next")
+        self._btn_next.setToolTip("Select and open the cell one row down the list (the next riskiest).")
+        self._btn_next.clicked.connect(lambda: self.step(1))
+        actions.addWidget(self._btn_next)
         self._btn_open_cell = QPushButton("Open Cell")
-        self._btn_open_cell.setToolTip("Open the selected cell to review its labels (or double-click a row).")
+        self._btn_open_cell.setToolTip("Open the selected cells, each in its own tab, to review their labels "
+                                       "(or double-click a row).")
         self._btn_open_cell.clicked.connect(self._on_open_selected)
         actions.addWidget(self._btn_open_cell)
         self._btn_mark_ok = QPushButton("Mark OK")
@@ -231,6 +259,7 @@ class FlagReviewPanel(QWidget):
             self._summary.setText("")
             self._file_label.setText("")
             self._table.setRowCount(0)
+            self._update_step_buttons()
             return
         folder = self._payload.get("folder") or str(self._path.parent)
         self._title.setText(f"Flag review of {folder}  ·  {self._payload.get('timestamp', '')}  ·  "
@@ -268,6 +297,7 @@ class FlagReviewPanel(QWidget):
                       if rec.get("stage1_confidence") is not None else "")
             rank = (f"{rec['rank_in_class']} / {rec['class_size']}"
                     if rec.get("rank_in_class") is not None else "")
+            warnings = warnings_text(rec)
             values = [
                 ("●" if rec.get("flagged") else "", i),  # i: position in the riskiest-first order
                 (rec.get("file", ""), rec.get("file", "").lower()),
@@ -275,6 +305,7 @@ class FlagReviewPanel(QWidget):
                 (f"{float(f1):.3f}" if f1 is not None else "", float(f1) if f1 is not None else 9.0),
                 (rank, float(rec.get("rank_in_class") or 1e9)),
                 (reason_text(rec, share), reason_text(rec, share)),
+                (warnings, warnings or "~"),  # "~": rows without warnings sort last
                 (stage1, stage1),
                 (str(rec.get("nodes") or ""), int(rec.get("nodes") or 0)),
                 (str(rec.get("type_changes") or 0) if rec.get("labeled") else "", int(rec.get("type_changes") or 0)),
@@ -287,6 +318,8 @@ class FlagReviewPanel(QWidget):
                 if col == 0:
                     item.setForeground(QBrush(QColor(200, 40, 40)))
                     item.setTextAlignment(Qt.AlignCenter)
+                if col == _WARNINGS_COL and text:
+                    item.setToolTip(text)
                 if not rec.get("labeled"):
                     item.setForeground(QBrush(_UNLABELED_FG))
                 elif rec.get("class_mismatch"):
@@ -296,7 +329,11 @@ class FlagReviewPanel(QWidget):
                 self._table.setItem(i, col, item)
         self._table.setSortingEnabled(True)
         self._table.sortItems(sort_section, sort_order)
+        # Reviews written before warnings were recorded never carry any: hide
+        # the column for them rather than show it empty.
+        self._table.setColumnHidden(_WARNINGS_COL, not any(warnings_text(r) for r in self._records))
         self._update_summary()
+        self._update_step_buttons()
 
     def _update_summary(self) -> None:
         labeled = [r for r in self._records if r.get("labeled")]
@@ -323,25 +360,61 @@ class FlagReviewPanel(QWidget):
         idx = item.data(Qt.UserRole + 1)
         return self._records[int(idx)] if idx is not None else None
 
-    def _selected_records(self) -> list[dict[str, Any]]:
-        rows = sorted({ix.row() for ix in self._table.selectionModel().selectedRows()})
-        return [rec for rec in (self._record_at(r) for r in rows) if rec is not None]
+    def _selected_rows(self) -> list[int]:
+        return sorted({ix.row() for ix in self._table.selectionModel().selectedRows()})
 
-    def _open_row(self, row: int) -> None:
-        rec = self._record_at(row)
-        if rec is None:
-            return
-        for key in ("output_path", "input_path"):
-            path = rec.get(key)
-            if path and Path(path).is_file():
-                self.open_file_requested.emit(str(path))
-                return
-        self.log_message.emit(f"Flag review: cannot find the file for {rec.get('file')}.")
+    def _selected_records(self) -> list[dict[str, Any]]:
+        return [rec for rec in (self._record_at(r) for r in self._selected_rows()) if rec is not None]
+
+    def _open_rows(self, rows: list[int]) -> None:
+        """Ask the main window to open the cells in ``rows``, in table order."""
+        paths: list[str] = []
+        for row in rows:
+            rec = self._record_at(row)
+            if rec is None:
+                continue
+            path = next((str(rec[key]) for key in ("output_path", "input_path")
+                         if rec.get(key) and Path(rec[key]).is_file()), None)
+            if path is None:
+                self.log_message.emit(f"Flag review: cannot find the file for {rec.get('file')}.")
+            elif path not in paths:
+                paths.append(path)
+        if paths:
+            self.open_files_requested.emit(paths)
 
     def _on_open_selected(self) -> None:
-        rows = sorted({ix.row() for ix in self._table.selectionModel().selectedRows()})
+        self._open_rows(self._selected_rows())
+
+    def _on_row_double_clicked(self, row: int) -> None:
+        rows = self._selected_rows()
+        self._open_rows(rows if row in rows else [row])
+
+    def step(self, delta: int) -> None:
+        """Move the selection ``delta`` rows down (up if negative) and open that cell.
+
+        With several rows selected, Next continues below the last of them and
+        Previous above the first. With none selected, Next starts at the top
+        of the list and Previous at the bottom.
+        """
+        count = self._table.rowCount()
+        if count == 0:
+            return
+        rows = self._selected_rows()
         if rows:
-            self._open_row(rows[0])
+            target = (rows[-1] if delta > 0 else rows[0]) + int(delta)
+        else:
+            target = 0 if delta > 0 else count - 1
+        if not 0 <= target < count:
+            return
+        self._table.setCurrentCell(target, 0, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+        self._table.scrollToItem(self._table.item(target, 0))
+        self._open_rows([target])
+
+    def _update_step_buttons(self) -> None:
+        count = self._table.rowCount() if self._path is not None else 0
+        rows = self._selected_rows() if count else []
+        self._btn_previous.setEnabled(count > 0 and (not rows or rows[0] > 0))
+        self._btn_next.setEnabled(count > 0 and (not rows or rows[-1] < count - 1))
 
     def _mark_selected(self, status: str) -> None:
         recs = [r for r in self._selected_records() if r.get("labeled")]
@@ -387,4 +460,4 @@ class FlagReviewPanel(QWidget):
             self.log_message.emit(f"Could not export flag review: {exc}")
 
 
-__all__ = ["FlagReviewPanel", "reason_text"]
+__all__ = ["FlagReviewPanel", "reason_text", "warnings_text"]

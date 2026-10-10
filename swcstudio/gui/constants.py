@@ -31,3 +31,20 @@ def color_for_type(t: int) -> str:
     if definition and str(definition.get("color", "")).strip():
         return str(definition["color"]).strip()
     return DEFAULT_COLORS["custom"]
+
+def type_legend_entries(types) -> list[tuple[int, str, str]]:
+    """Return ``(type id, label, colour)`` for each distinct type in ``types``.
+
+    Soma, axon, basal and apical come first, then custom types, then undefined
+    (0) and invalid negative types. Labels and colours come from
+    ``label_for_type`` / ``color_for_type``, the helpers the views draw with,
+    so a legend built from this cannot disagree with the drawing.
+    """
+    present: set[int] = set()
+    for t in types:
+        try:
+            present.add(int(t))
+        except (TypeError, ValueError):
+            continue
+    ordered = sorted(present, key=lambda t: (t <= 0, abs(t)))
+    return [(t, label_for_type(t), color_for_type(t)) for t in ordered]
