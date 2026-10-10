@@ -350,15 +350,11 @@ class LengthCheckTests(_CheckTestCase):
     def test_all_segment_lengths_nonzero_reports_zero_length(self) -> None:
         self._assert_fail("all_segment_lengths_nonzero", self._zero_length_rows(), expected_ids=[4])
 
-    # Bug: the parent lookup indexes past the end of the sorted ID array when a
-    # parent ID is larger than every node ID (native_checks.py:45-46).
-    @unittest.expectedFailure
+    # A parent id larger than every node id must not crash the parent lookup.
     def test_segment_lengths_ignore_parent_id_above_max_id(self) -> None:
         rows = list(SMALL_CELL) + ["6 3 30 0 0 0.5 99"]
         self._assert_pass("all_segment_lengths_nonzero", rows)
 
-    # Bug: same out-of-range parent lookup as above (native_checks.py:45-46).
-    @unittest.expectedFailure
     def test_section_lengths_ignore_parent_id_above_max_id(self) -> None:
         rows = list(SMALL_CELL) + ["6 3 30 0 0 0.5 99"]
         self._assert_pass("all_section_lengths_nonzero", rows)

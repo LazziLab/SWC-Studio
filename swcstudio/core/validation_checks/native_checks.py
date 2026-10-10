@@ -43,7 +43,10 @@ def _segment_length_stats(ctx) -> dict[str, Any]:
     sort_idx = np.argsort(ids)
     ids_sorted = ids[sort_idx]
     pos = np.searchsorted(ids_sorted, parent_ids)
-    valid = (pos < ids_sorted.size) & (ids_sorted[pos] == parent_ids)
+    # A parent id above every node id gives pos == size; clamp before
+    # indexing, since & does not short-circuit.
+    found = ids_sorted[np.minimum(pos, ids_sorted.size - 1)] == parent_ids
+    valid = (pos < ids_sorted.size) & found
     child_idx = child_idx[valid]
     if child_idx.size == 0:
         out = {"segment_count": 0, "invalid_ids": []}
