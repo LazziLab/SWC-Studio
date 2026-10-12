@@ -133,9 +133,10 @@ class LabelerWriterParityTests(unittest.TestCase):
             run_file(str(path), BatchOptions(), write_output=False, write_log=False)
         self.assertIn("QC rejected; node id used on more than one line: 1", str(ctx.exception))
 
-    def test_a_branch_folded_into_the_soma_is_the_one_deliberate_difference(self) -> None:
-        # The labeler's writer writes such a branch as soma; SWC-Studio leaves
-        # its nodes as they were and says so. Every other node matches.
+    def test_a_branch_with_no_standard_type_matches_the_labeler(self) -> None:
+        # Labeler 1.0.0 merged such a branch into the soma and its writer wrote
+        # it as soma; since 1.0.1 it is labeled like any neurite, and SWC-Studio
+        # writes exactly what the labeler writes, node for node.
         lines = CELLS["synthetic_three_class.swc"].read_text(encoding="utf-8").splitlines()
         nodes = [ln.split() for ln in lines if ln and not ln.startswith("#")]
         parent = {int(p[0]): int(p[6]) for p in nodes}
@@ -155,13 +156,13 @@ class LabelerWriterParityTests(unittest.TestCase):
         ours = self.tmp / "ours.swc"
         res = run_file(str(path), BatchOptions(), output_path=str(ours), write_log=False)
         theirs = _labeler_writes(path, self.tmp / "theirs.swc").decode().splitlines()
-        for mine, other in zip(ours.read_text(encoding="utf-8").splitlines(), theirs):
-            nid = int(mine.split()[0])
-            if nid in branch:
-                self.assertEqual((mine.split()[1], other.split()[1]), ("0", "1"))
-            else:
-                self.assertEqual(mine, other)
-        self.assertEqual(res.unlabeled_nodes, len(branch))
+        mine_lines = ours.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(mine_lines), len(theirs))
+        for mine, other in zip(mine_lines, theirs):
+            self.assertEqual(mine, other)
+            if int(mine.split()[0]) in branch:
+                self.assertIn(mine.split()[1], {"2", "3", "4"})
+        self.assertEqual(res.unlabeled_nodes, 0)
 
 
 if __name__ == "__main__":

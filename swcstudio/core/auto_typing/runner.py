@@ -436,10 +436,10 @@ def _labels_for_rows(rows: list[dict[str, Any]], label_by_id: dict[int, int]
 
     The labeler's parse merges the points of a soma into one node, so a soma
     point it merged away has no label of its own and is labeled soma, as the
-    labeler's writer does. The same parse also folds into the soma a branch
-    leaving it that holds no standard type at all (type 0 or a custom type
-    throughout): such a node was not soma in the input and is not written as
-    soma; it gets ``None`` and keeps its type.
+    labeler's writer does. Any other node without a label (labeler 1.0.0
+    folded a branch with no standard type into the soma; 1.0.1 labels it)
+    was not soma in the input and is not written as soma: it gets ``None``
+    and keeps its type.
     """
     soma = _soma_ids_before_merge(rows)
     labels: list[int | None] = []

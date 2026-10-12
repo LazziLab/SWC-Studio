@@ -243,7 +243,7 @@ Important defaults:
 ## Auto Labeling Algorithm
 
 The suspicious label issue and Auto Label Editing run the same
-engine, the SWC auto-labeler 1.0.0. It is implemented in:
+engine, the SWC auto-labeler 1.0.1. It is implemented in:
 
 - `swcstudio/core/auto_typing/` (engine package)
 - `swcstudio/core/labeler/` (the labeler's own code)
@@ -255,7 +255,7 @@ quality flag.
 ### Pipeline architecture
 
 Each file goes through five stages. The model files live in the
-`labeler-1.0.0/` model folder.
+`labeler-1.0.1/` model folder.
 
 | Stage | Files | What it produces |
 |---|---|---|

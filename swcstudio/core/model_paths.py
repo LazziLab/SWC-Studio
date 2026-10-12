@@ -87,7 +87,7 @@ def labeler_info() -> dict[str, Any]:
 
 
 def labeler_models_dirname() -> str:
-    """Folder name of the shipped model set, e.g. ``labeler-1.0.0``."""
+    """Folder name of the shipped model set, e.g. ``labeler-1.0.1``."""
     return str(labeler_info()["models_dir"])
 
 

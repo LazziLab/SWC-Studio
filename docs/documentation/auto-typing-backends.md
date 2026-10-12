@@ -1,6 +1,6 @@
 # Auto-Typing Engine
 
-`SWC-Studio` labels SWC files with the SWC auto-labeler, version 1.0.0
+`SWC-Studio` labels SWC files with the SWC auto-labeler, version 1.0.1
 (<https://github.com/Mio0v0/swc-autolabeler>). The CLI, the GUI and the
 Python API all run the same labeler. It labels every node as soma, axon,
 basal dendrite or apical dendrite from the cell's geometry, so the input
@@ -42,11 +42,7 @@ Each file goes through five stages:
   several cells. It is refused before labeling. Split it first with
   `swcstudio split <folder>` (`batch split`).
 - A branch leaving the soma with no standard type anywhere in it (type 0
-  or a custom type throughout) is folded into the soma by the labeler's
-  normalization and gets no label. SWC-Studio does not write such nodes
-  as soma: they keep their type, and the result's warnings say
-  `N nodes on a branch with no standard type were left unlabeled`.
-  Label the branch by hand, or give it a neurite type and label again.
+  or a custom type throughout) is labeled like any other branch.
 - A labeled cell missing a compartment of its class gets a warning such
   as `no axon labeled`. When the input was labeled and had no axon
   either, the warning adds `(none in the input either)`: the tracing may
@@ -105,8 +101,8 @@ workflow.
 
 ## Required Model Files
 
-The model set is one folder, `labeler-1.0.0/`. It ships inside the
-package at `swcstudio/data/models/labeler-1.0.0/`, so pip wheels, source
+The model set is one folder, `labeler-1.0.1/`. It ships inside the
+package at `swcstudio/data/models/labeler-1.0.1/`, so pip wheels, source
 installs and the desktop apps can label without a download.
 
 | Filename | Role | Required? | Size |
@@ -136,13 +132,13 @@ A folder you name is the only folder searched. You can name one with:
 - the `model_dir` key of the auto-typing configuration file
 
 They take precedence in that order. The named folder can hold the model
-files itself, or hold them in a `labeler-1.0.0/` subfolder. If it lacks
+files itself, or hold them in a `labeler-1.0.1/` subfolder. If it lacks
 a required file, auto-labeling stops and reports what is missing. It
 does not fall back to other models.
 
 Without a named folder, SWC-Studio searches these places in order and
 uses the first complete one. In each place it looks in the
-`labeler-1.0.0/` subfolder first:
+`labeler-1.0.1/` subfolder first:
 
 1. the user data folder, where model updates are installed:
    - Windows: `%APPDATA%\swcstudio\models`
@@ -474,7 +470,7 @@ Auto-labeling cannot find its model files.
 No complete model folder was found. The message lists every folder
 searched and what is missing. Run `swcstudio models status`. If you
 named a folder, check that it holds the three required files, directly
-or in `labeler-1.0.0/`.
+or in `labeler-1.0.1/`.
 
 ### A file is rejected
 
@@ -500,10 +496,9 @@ text editor, then label it again.
 cell.swc: ... WARNING: 977 nodes on a branch with no standard type were left unlabeled
 ```
 
-A branch leaving the soma had no standard type anywhere in it, so the
-labeler folded it into the soma and gave it no label. Those nodes keep
-their type. Give the branch a neurite type (or label it by hand) and
-label the cell again.
+The labeler returned no label for some nodes. SWC-Studio never writes
+such nodes as soma: they keep their type. Label them by hand, or give
+the branch a neurite type and label the cell again.
 
 ### A file holds several cells
 

@@ -55,7 +55,7 @@ Use this path if you only need the desktop application and don't want to deal wi
 The auto-labeling models are bundled inside the app, so no separate
 download is needed.
 
-Auto-labeling runs the SWC auto-labeler, version 1.0.0
+Auto-labeling runs the SWC auto-labeler, version 1.0.1
 (<https://github.com/Mio0v0/swc-autolabeler>), on every file:
 
 1. **Structural checks** (Stage 0). The file must hold one connected

@@ -137,7 +137,7 @@ not score the quality flag. Its action opens `Auto Label Editing`.
 
 ## Auto-labeling and flag review
 
-Auto-labeling uses the SWC auto-labeler, version 1.0.0.
+Auto-labeling uses the SWC auto-labeler, version 1.0.1.
 
 - `Morphology Editing -> Auto Label Editing` labels the current canvas.
   Choose the cell class (`Auto (Stage 1 decides)`,

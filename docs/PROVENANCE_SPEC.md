@@ -204,7 +204,7 @@ For AI ops the sub-op also carries an `ai_run_ref` blob hash:
 ```json
 {
   "kind": "auto_label",
-  "params": {"cell_type": "auto", "flag_enabled": true, "labeler_version": "1.0.0",
+  "params": {"cell_type": "auto", "flag_enabled": true, "labeler_version": "1.0.1",
              "cell_type_result": "pyramidal", "stage1_cell_type": "pyramidal",
              "class_mismatch": false, "predicted_f1": 0.937},
   "summary": {"nodes_modified": 1283},
@@ -256,7 +256,7 @@ MLflow-compatible field names. Stored in `objects/<sha>.zst`.
   "started_at": "2024-01-01T11:45:00Z",
   "finished_at": "2024-01-01T11:45:22Z",
   "status": "FINISHED",
-  "params":  {"cell_type": "auto", "flag_enabled": true, "labeler_version": "1.0.0", "...": "..."},
+  "params":  {"cell_type": "auto", "flag_enabled": true, "labeler_version": "1.0.1", "...": "..."},
   "metrics": {},
   "artifacts": [],
   "source_version": {"tool": "swcstudio", "version": "0.2.0", "git_sha": "a1b2c3d"},
@@ -363,7 +363,7 @@ from swcstudio.core.provenance import tracked_op, OpKind
 with tracked_op(
     dataset_path="/path/to/neuron_001.swc",
     kind=OpKind.AUTO_LABEL,
-    params={"cell_type": "auto", "flag_enabled": True, "labeler_version": "1.0.0"},
+    params={"cell_type": "auto", "flag_enabled": True, "labeler_version": "1.0.1"},
     message="Auto-label apical/basal",
     is_ai=True,
 ) as op:
@@ -523,7 +523,7 @@ schema_version: 1
 op:        auto_label
 input:     {sha256: ..., path: 'neuron_001.swc'}
 output:    {sha256: ...}
-params:    {"cell_type": "pyramidal", "class_mismatch": false, "flag_enabled": true, "labeler_version": "1.0.0", ...}
+params:    {"cell_type": "pyramidal", "class_mismatch": false, "flag_enabled": true, "labeler_version": "1.0.1", ...}
 env_hash:  ...
 command:   'swcstudio auto-label --cell-class 3-class neuron_001.swc'
 ```

@@ -206,7 +206,7 @@ python -m swcstudio.gui.main
 
 `swcstudio models status` is worth running once after install: it
 prints the auto-labeler's version, the model folders it searched, and
-the folder it uses. One `labeler-1.0.0` folder should be marked
+the folder it uses. One `labeler-1.0.1` folder should be marked
 `[COMPLETE]`, and the JSON summary should list the paths of
 `cell_type_classifier.pkl`, `branch_classifier.pkl`,
 `branch_correction.joblib`, and `flag_model.joblib`.

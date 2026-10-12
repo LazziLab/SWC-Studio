@@ -158,7 +158,11 @@ class BrokenNodeLinesAreRefusedTests(_TmpCase):
 
 
 class BranchFoldedIntoSomaTests(_TmpCase):
-    """A primary branch with no standard type is not written as soma."""
+    """A primary branch with no standard type is labeled as a neurite, never as soma.
+
+    Labeler 1.0.0 merged such a branch into the soma; since 1.0.1 it stays a
+    neurite, so the model labels it like any other branch.
+    """
 
     def _lines_with_type0_branch(self) -> tuple[list[str], set[int]]:
         lines = _cell_lines()
@@ -177,27 +181,26 @@ class BranchFoldedIntoSomaTests(_TmpCase):
         out = [_with_field(ln, 1, "0") if int(ln.split()[0]) in branch else ln for ln in lines]
         return out, branch
 
-    def test_nodes_keep_their_type_and_the_result_says_so(self) -> None:
+    def test_branch_is_labeled_as_a_neurite(self) -> None:
         lines, branch = self._lines_with_type0_branch()
         path = self._write("cell.swc", lines)
         res = run_file(str(path), BatchOptions(), write_output=False, write_log=False)
         by_id = {int(r["id"]): t for r, t in zip(res.rows, res.types)}
-        self.assertEqual({by_id[n] for n in branch}, {0})
+        self.assertLessEqual({by_id[n] for n in branch}, {2, 3, 4})
         self.assertEqual(sum(1 for t in res.types if t == 1), 1)
-        self.assertEqual(res.unlabeled_nodes, len(branch))
-        self.assertIn(f"{len(branch)} nodes on a branch with no standard type were left unlabeled", res.warnings)
+        self.assertEqual(res.unlabeled_nodes, 0)
+        self.assertFalse(any("left unlabeled" in w for w in res.warnings), res.warnings)
 
-    def test_batch_line_and_review_record_say_so(self) -> None:
+    def test_batch_writes_the_branch_as_a_neurite(self) -> None:
         folder = self.tmp / "cells"
         folder.mkdir()
         lines, branch = self._lines_with_type0_branch()
         (folder / "cell.swc").write_text("\n".join(lines) + "\n", encoding="utf-8")
         res = run_folder(str(folder), options=BatchOptions())
-        warning = f"{len(branch)} nodes on a branch with no standard type were left unlabeled"
-        self.assertIn(warning, res.per_file[0])
-        self.assertIn(warning, res.flag_records[0]["warnings"])
+        self.assertNotIn("left unlabeled", res.per_file[0])
         written = swc_data_rows_from_text(strip_prov_lines((folder / "cell.swc").read_bytes()).decode())[1]
-        self.assertEqual({r["type"] for r in written if r["id"] in branch}, {0})
+        self.assertLessEqual({r["type"] for r in written if r["id"] in branch}, {2, 3, 4})
+        self.assertEqual(sum(1 for r in written if r["type"] == 1), 1)
 
 
 class MissingCompartmentWarningTests(_TmpCase):

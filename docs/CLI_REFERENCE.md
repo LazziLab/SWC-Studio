@@ -296,8 +296,7 @@ swcstudio auto-fix cell.swc
   file whose soma nodes form several disconnected groups is refused;
   split it first with `swcstudio split`.
 - A branch leaving the soma that has no standard type anywhere (type 0
-  or a custom type throughout) is not labeled. Its nodes keep their
-  type, and `warnings` says how many were left unlabeled.
+  or a custom type throughout) is labeled like any other branch.
 - The quality flag uses its fixed cut-off for a single file.
 
 Options:
@@ -326,7 +325,7 @@ The command prints JSON. The main fields are:
 | `notes` | what the labeler assumed about unlabeled input |
 | `warnings` | a compartment the cell's class should have but got no node of (`no axon labeled`; with `(none in the input either)` when the labeled input had none), and nodes left unlabeled |
 | `unlabeled_nodes` | nodes the labeler did not label; they keep their type |
-| `labeler_version` | the labeler version, for example `1.0.0` |
+| `labeler_version` | the labeler version, for example `1.0.1` |
 | `model_record` | the model folder used: `model_dir` (home written as `~`), `model_source` (`argument`, `env`, `config`, `user` or `bundled`), `model_version`, `model_files` (SHA-256 of each model file) and `model_sha` (SHA-256 of the sorted lines `<file name> <sha256>`). The same keys are stored in the history record |
 | `commit_sha`, `branch`, `input_sha`, `output_sha`, `diff_ref`, `ai_run_ref` | the history commit |
 
@@ -575,7 +574,7 @@ it came from: `argument`, `env`, `config`, `user` or `bundled`),
 
 ### Auto-Label Model Folder
 
-Auto-labeling uses one model folder, `labeler-1.0.0/`, with four files:
+Auto-labeling uses one model folder, `labeler-1.0.1/`, with four files:
 
 | File | Stage | Required? |
 |---|---|---|
@@ -588,7 +587,7 @@ A named folder is the only folder searched. The first of these names
 it: `--model-dir` (or the GUI's model folder picker), the
 `SWCSTUDIO_MODEL_DIR` environment variable, `model_dir` in the
 auto-typing configuration file. It can hold the files itself or in a
-`labeler-1.0.0/` subfolder. If it lacks a required file, auto-labeling
+`labeler-1.0.1/` subfolder. If it lacks a required file, auto-labeling
 stops and reports what is missing. Without a named folder, the engine
 searches the user data folder, the desktop app's model folder and the
 package folder `swcstudio/data/models`, in that order. Each run

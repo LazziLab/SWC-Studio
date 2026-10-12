@@ -39,4 +39,4 @@ references:
       - given-names: Gianluca
         family-names: Lazzi
     repository-code: "https://github.com/Mio0v0/swc-autolabeler"
-    version: 1.0.0
+    version: 1.0.1

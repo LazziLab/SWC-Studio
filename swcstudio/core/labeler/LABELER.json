@@ -1,10 +1,10 @@
 {
   "name": "SWC auto-labeler",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "source_repository": "https://github.com/Mio0v0/swc-autolabeler",
-  "source_commit": "bb2e15ceeda8f059d722056b75af1ffe40862faf",
+  "source_commit": "cb961224d298ee22ad77d513f9870ecd8fcb98a8",
   "source_model_set": "pipeline/models/seed123",
-  "models_dir": "labeler-1.0.0",
+  "models_dir": "labeler-1.0.1",
   "models": {
     "cell_type_classifier.pkl": {
       "bytes": 1297496,

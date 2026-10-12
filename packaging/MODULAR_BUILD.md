@@ -21,7 +21,7 @@ app/
   swcstudio/
 models/
   VERSION
-  labeler-1.0.0/
+  labeler-1.0.1/
     cell_type_classifier.pkl
     branch_classifier.pkl
     branch_correction.joblib

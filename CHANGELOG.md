@@ -26,7 +26,7 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Auto-labeling now runs the SWC auto-labeler v1.0.0
+- Auto-labeling now runs the SWC auto-labeler v1.0.1
   (<https://github.com/Mio0v0/swc-autolabeler>). It has four stages:
   structural checks, cell class, subtree labeling with a learned branch
   correction, and a quality flag that ranks cells for review. You can choose
@@ -65,8 +65,10 @@ follow [Semantic Versioning](https://semver.org/).
   parent loop are refused before auto-labeling, and Index Clean, the
   geometry edits and Split refuse them instead of dropping or rewiring
   rows.
-- Nodes on a branch the labeler leaves out (type 0 or a custom type with
-  no standard type below it) keep their type, with a warning, instead of
+- A type-0 or custom-typed stretch attached directly to the soma is
+  labeled like any other neurite (SWC auto-labeler 1.0.1). It was merged
+  into the soma and written as soma before. Should the labeler ever leave
+  a node without a label, it keeps its type, with a warning, instead of
   being written as soma.
 - Consolidate Soma gives the merged soma the radius of the sphere with
   the soma points' surface, as the labeler does. A standard 3-point soma
