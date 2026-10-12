@@ -76,6 +76,17 @@ follow [Semantic Versioning](https://semver.org/).
   bundled models (the environment variable now wins over the config).
 - Simplification always keeps soma points and the node where a
   compartment starts.
+- Radii cleaning bounds each node type by a fixed plausible radius range
+  (axon 0.05–5 µm, basal dendrite 0.05–8, apical dendrite 0.05–10, other
+  neurite types 0.05–10) instead of percentiles of the file's own radii,
+  and takes reference and replacement values only from radii inside the
+  range. On a file whose axon radii ran up to 50 µm, the old bounds
+  followed the bad values and raised 0.004 µm placeholders to about
+  11 µm. The axon floor (raise axon radii below 0.12 µm) is now off by
+  default; on clean Allen and NeuroMorpho.Org cells it changed 33–93% of
+  nodes. Radii below 0.05 µm are no longer raised silently by the
+  replacement clamp, and a placeholder parent no longer caps its
+  children's radii.
 
 ### Fixed
 

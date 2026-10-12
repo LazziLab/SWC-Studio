@@ -171,7 +171,8 @@ The suspicious radii issue and Auto Radii Editing use the same shared backend in
 The current cleaner is directed-path and fixed-point based:
 
 1. build topology and directed branch paths
-2. compute per-type sanity bounds
+2. look up each node type's plausible radius range (fixed, not taken from
+   the file)
 3. `Pass 1`: local outlier repair
 4. `Pass 2`: taper enforcement
 5. `Pass 3`: local polynomial smoothing
@@ -179,6 +180,23 @@ The current cleaner is directed-path and fixed-point based:
 7. repeat until no issue-visible changes remain
 
 Soma radii are always preserved.
+
+Plausible radius ranges (µm), `sanity_bounds`:
+
+| Type | Minimum | Maximum |
+|---|---|---|
+| axon (2) | 0.05 | 5 |
+| basal dendrite (3) | 0.05 | 8 |
+| apical dendrite (4) | 0.05 | 10 |
+| any other neurite type | 0.05 | 10 |
+
+A radius above its type's maximum is always flagged. A radius below the
+minimum is changed only when it is an outlier among its neighbours, or when
+`small_radius_zero_only` is off: values such as 0.004 are common
+placeholders for an unknown radius, and replacing them would invent data.
+Only radii inside the range serve as reference or replacement values, so a
+file whose radii are mostly wrong cannot pull good values toward them. The
+taper rule caps a node only by a parent whose radius is plausible.
 
 ### Reasons recorded per changed node
 
@@ -201,8 +219,9 @@ Main config file:
 Current top-level rule groups:
 
 - `small_radius_zero_only`
-- `sanity_bounds.global`
-- `sanity_bounds.per_type`
+- `sanity_bounds.default` (`min_radius`, `max_radius`)
+- `sanity_bounds.per_type` (`enabled`, `min_radius`, `max_radius`; configs
+  from earlier versions with `lower_abs`/`upper_abs` still work)
 - `local_outlier`
 - `taper`
 - `axon_floor`
@@ -215,7 +234,7 @@ Important defaults:
 - `local_outlier.window_nodes = 5`
 - `local_outlier.max_percent_deviation = 0.5`
 - `taper.slack = 0.05`
-- `axon_floor.min_radius = 0.12`
+- `axon_floor.enabled = false` (raises axon radii below `axon_floor.min_radius = 0.12` when on)
 - `savgol.window_nodes = 7`
 - `savgol.polyorder = 2`
 - `fixed_point.max_passes = 32`

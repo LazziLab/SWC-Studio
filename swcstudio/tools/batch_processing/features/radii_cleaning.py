@@ -46,16 +46,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "rules": {
         "small_radius_zero_only": True,
         "sanity_bounds": {
-            "global": {
-                "lower_percentile": 1.0,
-                "upper_percentile": 99.5,
-                "lower_abs": 0.05,
-                "upper_abs": 30.0,
-            },
+            "default": {"min_radius": 0.05, "max_radius": 10.0},
             "per_type": {
-                "2": {"enabled": True, "lower_percentile": 1.0, "upper_percentile": 99.5, "lower_abs": 0.05, "upper_abs": 30.0},
-                "3": {"enabled": True, "lower_percentile": 1.0, "upper_percentile": 99.5, "lower_abs": 0.05, "upper_abs": 30.0},
-                "4": {"enabled": True, "lower_percentile": 1.0, "upper_percentile": 99.5, "lower_abs": 0.05, "upper_abs": 30.0},
+                "2": {"enabled": True, "min_radius": 0.05, "max_radius": 5.0},
+                "3": {"enabled": True, "min_radius": 0.05, "max_radius": 8.0},
+                "4": {"enabled": True, "min_radius": 0.05, "max_radius": 10.0},
             },
         },
         "local_outlier": {
@@ -68,7 +63,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "slack": 0.05,
         },
         "axon_floor": {
-            "enabled": True,
+            "enabled": False,
             "min_radius": 0.12,
         },
         "savgol": {

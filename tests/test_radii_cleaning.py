@@ -182,3 +182,62 @@ class RadiiCleaningTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _axon_path(radii: list[float]) -> str:
+    rows = ["1 1 0 0 0 6 -1"]
+    for k, r in enumerate(radii):
+        nid = k + 2
+        rows.append(f"{nid} 2 {k + 5} 0 0 {r:g} {nid - 1}")
+    return "\n".join(rows) + "\n"
+
+
+class PlausibleRangeTests(unittest.TestCase):
+    """Bounds are fixed plausible ranges per type, not percentiles of the file."""
+
+    def test_implausible_neighbours_are_never_used_as_replacements(self) -> None:
+        # A run of axon radii far above any real axon (11-30 um) around
+        # 0.004 placeholders and a few plausible values.
+        radii = [0.4, 0.4, 0.4, 11.0, 0.004, 12.0, 30.0, 0.004, 11.0, 0.4, 0.4, 0.4]
+        out = clean_swc_text(_axon_path(radii))
+        new = out["dataframe"].loc[out["dataframe"]["type"] == 2, "radius"].tolist()
+        self.assertLessEqual(max(new), 5.0)
+        self.assertFalse(any(r > 1.0 for r in new), new)
+
+    def test_a_file_full_of_bad_radii_cannot_widen_its_own_bounds(self) -> None:
+        radii = [30.0] * 20 + [0.3] * 5
+        out = clean_swc_text(_axon_path(radii))
+        new = out["dataframe"].loc[out["dataframe"]["type"] == 2, "radius"].tolist()
+        self.assertLessEqual(max(new), 5.0)
+        self.assertTrue(all(c["reasons"] for c in out["change_details"]))
+
+    def test_small_radii_are_kept_and_never_raised_silently(self) -> None:
+        # Thin axons and 0.035 placeholders: below the old 0.12 axon floor
+        # and the 0.05 clamp, but nothing here is an outlier.
+        for value in (0.035, 0.1):
+            out = clean_swc_text(_axon_path([value] * 15))
+            self.assertEqual(out["change_details"], [], value)
+
+    def test_axon_floor_is_off_by_default_and_can_be_turned_on(self) -> None:
+        text = _axon_path([0.1] * 15)
+        self.assertEqual(clean_swc_text(text)["change_details"], [])
+        on = clean_swc_text(text, config_overrides={"rules": {"axon_floor": {"enabled": True}}})
+        self.assertTrue(on["change_details"])
+        self.assertTrue(all("axon_floor" in c["reasons"] for c in on["change_details"]))
+
+    def test_placeholder_parent_does_not_cap_its_children(self) -> None:
+        # Dendrite: a 0.004 placeholder right after the soma, then real radii.
+        rows = ["1 1 0 0 0 6 -1", "2 3 5 0 0 0.004 1"]
+        rows += [f"{k} 3 {k + 4} 0 0 1.0 {k - 1}" for k in range(3, 18)]
+        out = clean_swc_text("\n".join(rows) + "\n")
+        new = {int(r.id): float(r.radius) for r in out["dataframe"].itertuples()}
+        self.assertTrue(all(abs(new[k] - 1.0) < 1e-9 for k in range(4, 18)), new)
+
+    def test_ranges_come_from_config_and_legacy_upper_abs_still_counts(self) -> None:
+        text = _axon_path([4.0] * 15)  # thick but plausible for an axon (max 5)
+        self.assertEqual(clean_swc_text(text)["change_details"], [])
+        tight = {"rules": {"sanity_bounds": {"per_type": {"axon": {"type_id": 2, "max_radius": 2.0}}}}}
+        self.assertTrue(clean_swc_text(text, config_overrides=tight)["change_details"])
+        legacy = {"sanity_bounds": {"per_type": {"2": {"upper_abs": 2.0}}}}
+        df = parse_swc_text_preserve_tokens(text)
+        self.assertTrue(clean_radii_dataframe(df, rules=legacy)["change_details"])

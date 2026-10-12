@@ -25,7 +25,9 @@ It looks for:
 - non-positive radii (`<= 0`)
 - non-finite radii (`NaN`, `inf`)
 - local single-node spikes relative to a 5-node path window
-- radii that violate configured sanity bounds
+- radii above their type's plausible maximum (axon 5 µm, basal dendrite
+  8 µm, apical dendrite 10 µm, other neurite types 10 µm); these ranges are
+  fixed, so a file whose radii are mostly wrong cannot widen them
 - branch points that become thicker distally than biologically expected
 
 ## Triple-pass refinement
@@ -41,7 +43,10 @@ The current cleaner follows a path-aware three-pass method:
    - walks each branch segment from soma/proximal anchor toward the leaf
    - enforces `R_i <= R_(i-1) * (1 + slack)`
    - default taper slack is `0.05`
-   - axons can also enforce a minimum floor radius
+   - only a parent with a plausible radius caps its child, so a placeholder
+     such as 0.004 does not shrink the real radii below it
+   - axons can also enforce a minimum floor radius (`axon_floor`, off by
+     default)
 3. `Savitzky-Golay-style smoothing`
    - uses a local quadratic fit on each directed path
    - default window is `7` nodes
@@ -61,17 +66,17 @@ Validation radii cleaning is a thin wrapper over the same backend and can layer 
 Under `rules`:
 
 - soma radii are always preserved during radii cleaning
-- `small_radius_zero_only`: only treat very small values as abnormal if they are zero
-- `sanity_bounds.global.lower_percentile`
-- `sanity_bounds.global.upper_percentile`
-- `sanity_bounds.global.lower_abs`
-- `sanity_bounds.global.upper_abs`
-- `sanity_bounds.per_type`: per-type overrides
+- `small_radius_zero_only`: only treat very small values as abnormal if they
+  are zero (default `true`; a small value can still be a local outlier)
+- `sanity_bounds.default`: plausible range for types without their own entry
+  - `min_radius` (default `0.05`), `max_radius` (default `10`)
+- `sanity_bounds.per_type`: plausible range per node type, keyed by type
+  name or ID (with `type_id`)
   - `enabled`
-  - `lower_percentile`
-  - `upper_percentile`
-  - `lower_abs`
-  - `upper_abs`
+  - `min_radius`, `max_radius` (µm): axon `0.05`–`5`, basal dendrite
+    `0.05`–`8`, apical dendrite `0.05`–`10`
+  - configs from earlier versions with `lower_abs`/`upper_abs` still work;
+    their percentile keys are ignored
 - `local_outlier.enabled`
 - `local_outlier.window_nodes`
   - default: `5`
@@ -81,6 +86,7 @@ Under `rules`:
 - `taper.slack`
   - default: `0.05`
 - `axon_floor.enabled`
+  - default: `false` (many real axons are thinner than 0.12 µm)
 - `axon_floor.min_radius`
   - default: `0.12`
 - `savgol.enabled`
