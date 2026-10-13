@@ -56,10 +56,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "local_outlier": {
             "enabled": True,
             "window_nodes": 5,
-            "max_percent_deviation": 0.5,
+            "max_ratio": 3.0,
         },
         "taper": {
-            "enabled": True,
+            "enabled": False,
             "slack": 0.05,
         },
         "axon_floor": {

@@ -89,6 +89,14 @@ follow [Semantic Versioning](https://semver.org/).
   nodes. Radii below 0.05 µm are no longer raised silently by the
   replacement clamp, and a placeholder parent no longer caps its
   children's radii.
+- Radii cleaning changes only radii that are certainly wrong: invalid,
+  above the type's plausible maximum, or more than 3 times thicker or
+  thinner than their neighbours on both sides (`local_outlier.max_ratio`,
+  replacing `max_percent_deviation`, which flagged anything 50% off). The
+  taper cap (each node at most 5% thicker than its parent) is off by
+  default: it changed half the radii of clean cells, cut their membrane
+  surface by about 8%, and let one thin node thin the whole dendrite after
+  it. Clean NeuroMorpho.Org and Allen cells now come through unchanged.
 
 ### Fixed
 

@@ -39,10 +39,10 @@
     "local_outlier": {
       "enabled": true,
       "window_nodes": 5,
-      "max_percent_deviation": 0.5
+      "max_ratio": 3.0
     },
     "taper": {
-      "enabled": true,
+      "enabled": false,
       "slack": 0.05
     },
     "axon_floor": {

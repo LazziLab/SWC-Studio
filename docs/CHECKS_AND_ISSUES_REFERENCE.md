@@ -173,11 +173,17 @@ The current cleaner is directed-path and fixed-point based:
 1. build topology and directed branch paths
 2. look up each node type's plausible radius range (fixed, not taken from
    the file)
-3. `Pass 1`: local outlier repair
-4. `Pass 2`: taper enforcement
-5. `Pass 3`: local polynomial smoothing
-6. re-apply taper
+3. `Pass 1`: flag and replace radii that are invalid, above the plausible
+   maximum, or more than 3 times thicker or thinner than their plausible
+   neighbours on both sides (`local_outlier.max_ratio = 3`)
+4. `Pass 2`: taper enforcement (off by default)
+5. `Pass 3`: local polynomial smoothing of the flagged nodes' replacements
+6. re-apply taper (when on)
 7. repeat until no issue-visible changes remain
+
+Only radii that fail one of these tests change; natural variation (on
+expert-traced cells, 99% of radii lie within x1.9 of their neighbours) is
+left alone.
 
 Soma radii are always preserved.
 
@@ -196,7 +202,8 @@ minimum is changed only when it is an outlier among its neighbours, or when
 placeholders for an unknown radius, and replacing them would invent data.
 Only radii inside the range serve as reference or replacement values, so a
 file whose radii are mostly wrong cannot pull good values toward them. The
-taper rule caps a node only by a parent whose radius is plausible.
+taper rule, when turned on, caps a node only by a parent whose radius is
+plausible.
 
 ### Reasons recorded per changed node
 
@@ -232,8 +239,8 @@ Current top-level rule groups:
 Important defaults:
 
 - `local_outlier.window_nodes = 5`
-- `local_outlier.max_percent_deviation = 0.5`
-- `taper.slack = 0.05`
+- `local_outlier.max_ratio = 3`
+- `taper.enabled = false` (`taper.slack = 0.05` when on)
 - `axon_floor.enabled = false` (raises axon radii below `axon_floor.min_radius = 0.12` when on)
 - `savgol.window_nodes = 7`
 - `savgol.polyorder = 2`

@@ -241,3 +241,48 @@ class PlausibleRangeTests(unittest.TestCase):
         legacy = {"sanity_bounds": {"per_type": {"2": {"upper_abs": 2.0}}}}
         df = parse_swc_text_preserve_tokens(text)
         self.assertTrue(clean_radii_dataframe(df, rules=legacy)["change_details"])
+
+
+def _dendrite(radii: list[float]) -> str:
+    rows = ["1 1 0 0 0 5 -1"]
+    rows += [f"{k + 2} 3 {k + 5} 0 0 {r:g} {k + 1}" for k, r in enumerate(radii)]
+    return "\n".join(rows) + "\n"
+
+
+class OnlyCertainErrorsTests(unittest.TestCase):
+    """Only radii that are certainly wrong change; natural variation stays."""
+
+    def _dendrite_radii(self, out) -> list[float]:
+        df = out["dataframe"]
+        return [round(float(r), 6) for r in df.loc[df["type"] == 3, "radius"]]
+
+    def test_natural_variation_is_left_alone(self) -> None:
+        # Within x3 of the neighbours: a thinner node, swellings, an uneven run.
+        for radii in ([1.0] * 6 + [0.6] + [1.0] * 13,
+                      [0.5, 0.9, 0.6, 1.0, 0.7, 1.2, 0.8, 0.9, 1.4, 0.7, 0.9, 0.6]):
+            out = clean_swc_text(_dendrite(radii))
+            self.assertEqual(out["change_details"], [], radii)
+
+    def test_a_thin_node_does_not_thin_the_dendrite_after_it(self) -> None:
+        radii = [1.0] * 6 + [0.6] + [1.0] * 13
+        self.assertEqual(self._dendrite_radii(clean_swc_text(_dendrite(radii))), radii)
+
+    def test_spikes_and_dips_beyond_x3_are_repaired(self) -> None:
+        for bad in (4.0, 0.25):
+            radii = [1.0] * 8 + [bad] + [1.0] * 8
+            out = clean_swc_text(_dendrite(radii))
+            self.assertEqual([c["node_id"] for c in out["change_details"]], [10], bad)
+            self.assertEqual(out["change_details"][0]["reasons"][0], "local_outlier")
+            self.assertAlmostEqual(self._dendrite_radii(out)[8], 1.0, places=6)
+
+    def test_end_of_a_path_is_not_judged_on_one_side(self) -> None:
+        radii = [1.0] * 10 + [4.0]  # a thick tip has no neighbour beyond it
+        self.assertEqual(clean_swc_text(_dendrite(radii))["change_details"], [])
+
+    def test_taper_cap_is_off_by_default_and_can_be_turned_on(self) -> None:
+        radii = [1.0] * 5 + [1.3] * 10  # thickening by 30%, not an error
+        text = _dendrite(radii)
+        self.assertEqual(clean_swc_text(text)["change_details"], [])
+        on = clean_swc_text(text, config_overrides={"rules": {"taper": {"enabled": True}}})
+        self.assertTrue(on["change_details"])
+        self.assertTrue(all(any("taper" in r for r in c["reasons"]) for c in on["change_details"]))

@@ -42,13 +42,18 @@ DEFAULT_RULES: dict[str, Any] = {
             "4": {"enabled": True, "min_radius": 0.05, "max_radius": 10.0},
         },
     },
+    # Only a radius more than max_ratio times thicker or thinner than the
+    # median of its plausible neighbours (both sides) counts as an outlier.
     "local_outlier": {
         "enabled": True,
         "window_nodes": 5,
-        "max_percent_deviation": 0.5,
+        "max_ratio": 3.0,
     },
+    # Cap each dendrite node at its parent's radius x (1 + slack). Off by
+    # default: real dendrites do not taper monotonically, so the cap changed
+    # correct radii, and one thin node thinned everything distal to it.
     "taper": {
-        "enabled": True,
+        "enabled": False,
         "slack": 0.05,
     },
     # Raise axon radii below min_radius. Off by default: the axon's plausible
@@ -499,7 +504,10 @@ def _local_median_pass(
     if window_nodes % 2 == 0:
         window_nodes += 1
     half = window_nodes // 2
-    max_percent_deviation = float(local_cfg.get("max_percent_deviation", 0.5))
+    # A radius this many times thicker or thinner than its neighbours is an
+    # outlier. On expert-traced cells 99% of radii lie within x1.9 of their
+    # neighbours and 0.5% beyond x3, so x3 flags errors, not natural variation.
+    max_ratio = max(1.0, float(local_cfg.get("max_ratio", 3.0)))
 
     # Single-node paths too: they have no window, but the range check and
     # the non-positive repair still apply.
@@ -509,13 +517,11 @@ def _local_median_pass(
                 continue
             cur = float(radii[idx])
             plo, phi = _type_range(int(types[idx]), bounds)
-            left_nodes = path[max(0, j - half) : j]
-            right_nodes = path[j + 1 : min(len(path), j + half + 1)]
-            win_vals = [
-                float(radii[n])
-                for n in (left_nodes + right_nodes)
-                if _plausible(float(radii[n]), plo, phi)
-            ]
+            left_vals = [float(radii[n]) for n in path[max(0, j - half) : j]
+                         if _plausible(float(radii[n]), plo, phi)]
+            right_vals = [float(radii[n]) for n in path[j + 1 : min(len(path), j + half + 1)]
+                          if _plausible(float(radii[n]), plo, phi)]
+            win_vals = left_vals + right_vals
             local_median = _small_median(win_vals)
 
             flagged: list[str] = []
@@ -523,10 +529,11 @@ def _local_median_pass(
                 flagged.append("non_finite")
             elif cur <= 0.0:
                 flagged.append("non_positive")
-            elif local_median is not None and left_nodes and right_nodes and len(win_vals) >= 3:
-                denom = max(local_median, 1e-9)
-                deviation = abs(cur - local_median) / denom
-                if deviation > max_percent_deviation:
+            elif local_median is not None and left_vals and right_vals:
+                # Judged against plausible neighbours on both sides, so the end
+                # of a path or one bad neighbour cannot make a node look wrong.
+                ratio = cur / max(local_median, 1e-9)
+                if ratio > max_ratio or ratio < 1.0 / max_ratio:
                     flagged.append("local_outlier")
 
             enabled, lo, hi = bounds.get(int(types[idx]), (True, 0.0, float("inf")))
@@ -579,7 +586,11 @@ def _taper_pass(
     reason_name: str = "taper_cap",
 ) -> None:
     taper_cfg = dict(cfg.get("taper", {}))
-    if not bool(taper_cfg.get("enabled", True)):
+    use_taper = bool(taper_cfg.get("enabled", False))
+    axon_floor_cfg = dict(cfg.get("axon_floor", {}))
+    use_axon_floor = bool(axon_floor_cfg.get("enabled", False))
+    axon_floor = float(axon_floor_cfg.get("min_radius", 0.12))
+    if not (use_taper or use_axon_floor):
         return
 
     preserve_soma = bool(cfg.get("preserve_soma", True))
@@ -588,10 +599,6 @@ def _taper_pass(
     clamp_min = float(replacement_cfg.get("clamp_min", 0.05))
     clamp_max = float(replacement_cfg.get("clamp_max", 30.0))
     slack = max(0.0, float(taper_cfg.get("slack", 0.05)))
-
-    axon_floor_cfg = dict(cfg.get("axon_floor", {}))
-    use_axon_floor = bool(axon_floor_cfg.get("enabled", False))
-    axon_floor = float(axon_floor_cfg.get("min_radius", 0.12))
 
     for path in paths:
         if len(path) <= 1:
@@ -611,7 +618,7 @@ def _taper_pass(
             plo, phi = _type_range(int(types[idx]), bounds)
             # A placeholder (e.g. 0.004) or implausibly thick parent says
             # nothing about how thick its child may be.
-            if int(types[idx]) != 2 and _plausible(prev_radius, plo, phi):
+            if use_taper and int(types[idx]) != 2 and _plausible(prev_radius, plo, phi):
                 max_allowed = prev_radius * (1.0 + slack)
                 if cur > max_allowed:
                     cur = max_allowed
