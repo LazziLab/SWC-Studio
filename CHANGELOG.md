@@ -100,6 +100,12 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Editing a copy of a tracked SWC took the original's history: the copy
+  got the archive and the original's `<name>_history.swcstudio` was
+  deleted. The copy now starts its own archive from the original's
+  history, and the original keeps its own. Only a renamed SWC moves its
+  archive. A rename that changes only letter case (`cell.swc` to
+  `Cell.swc`) no longer deletes the archive on Windows and macOS.
 - A failing check with severity `info` (such as `no_node_id_gaps`) was
   shown as a critical issue. It is now reported as `info`.
 - `radius_upper_bound` was missing from the check catalog, so it had no

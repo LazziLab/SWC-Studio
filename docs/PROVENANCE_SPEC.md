@@ -79,6 +79,11 @@ Inside neuron_001_history.swcstudio after SWC-Studio decrypts/materializes it:
   next commit.
 - Move the SWC and its `<stem>_history.swcstudio` archive together
   and provenance survives.
+- A renamed SWC finds its old archive through the `repo=` field of its
+  `@PROV` header; the next commit writes the archive under the new name
+  and deletes the old one. A copy of an SWC, saved in the same folder
+  while the original still exists, starts its own archive from the
+  original's history, and the original keeps its archive.
 - Project-level `.swcstudio/` is a **derived index** rebuilt from the
   per-file logs. Useful for project-wide queries ("every AI run by
   Alice on this dataset") but never authoritative.

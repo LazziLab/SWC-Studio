@@ -226,13 +226,46 @@ def archive_history_dir(
         old_name = str(old_manifest.get("archive_name", "") or "")
     if old_name and old_name != archive.name:
         old_path = archive.parent / old_name
-        try:
-            old_path.unlink()
-        except FileNotFoundError:
-            pass
+        # A copy of a tracked SWC starts from the original's history, but
+        # the original keeps its archive: only a rename moves it.
+        if not _same_file(old_path, archive) and not _original_swc_present(
+            old_name, swc_path
+        ):
+            try:
+                old_path.unlink()
+            except FileNotFoundError:
+                pass
     if remove_dir:
         shutil.rmtree(hist, ignore_errors=True)
     return archive
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _original_swc_present(old_name: str, swc_path: str | os.PathLike[str]) -> bool:
+    """Whether the SWC an archive was named for still exists beside it."""
+    current = Path(swc_path)
+    stem = old_name
+    for suffix in (LEGACY_ARCHIVE_SUFFIX, ARCHIVE_SUFFIX):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    try:
+        siblings = list(current.parent.iterdir())
+    except OSError:
+        return False
+    return any(
+        p.stem == stem
+        and p.suffix.lower() == ".swc"
+        and p.is_file()
+        and not _same_file(p, current)
+        for p in siblings
+    )
 
 
 def _archive_for_open(swc_path: str | os.PathLike[str]) -> Path:
