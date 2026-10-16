@@ -2,7 +2,7 @@
 
 SWC-Studio labels with the auto-labeler's own code and models, so its labels and
 quality flags are the ones the labeler's paper reports. This script copies both
-from a checkout of the labeler repository (https://github.com/Mio0v0/swc-autolabeler):
+from a checkout of the labeler repository (https://github.com/LazziLab/swc-autolabeler):
 
 * the ``pipeline`` package into ``swcstudio/core/labeler/``. The copy is the
   labeler's code with two mechanical changes: its absolute ``pipeline.`` imports
@@ -59,7 +59,7 @@ README = """\
 # The SWC auto-labeler, as SWC-Studio runs it
 
 This folder is a copy of the released SWC auto-labeler's `pipeline` package
-(https://github.com/Mio0v0/swc-autolabeler), made by `scripts/sync_labeler.py`.
+(https://github.com/LazziLab/swc-autolabeler), made by `scripts/sync_labeler.py`.
 `LABELER.json` records the labeler version, the source commit and a SHA-256 for
 every model file SWC-Studio ships with it.
 
@@ -208,7 +208,7 @@ def sync(source: Path, seed_dir: str, allow_dirty: bool) -> dict:
         record = {
             "name": "SWC auto-labeler",
             "version": version,
-            "source_repository": "https://github.com/Mio0v0/swc-autolabeler",
+            "source_repository": "https://github.com/LazziLab/swc-autolabeler",
             "source_commit": commit,
             "source_model_set": seed_rel,
             "models_dir": models_dir_name,

@@ -1,7 +1,7 @@
 # The SWC auto-labeler, as SWC-Studio runs it
 
 This folder is a copy of the released SWC auto-labeler's `pipeline` package
-(https://github.com/Mio0v0/swc-autolabeler), made by `scripts/sync_labeler.py`.
+(https://github.com/LazziLab/swc-autolabeler), made by `scripts/sync_labeler.py`.
 `LABELER.json` records the labeler version, the source commit and a SHA-256 for
 every model file SWC-Studio ships with it.
 

@@ -249,7 +249,7 @@ def _default_neurite_label(neurite_labels: list[int]) -> int:
     """The label to fall back on when Stage 2 says nothing usable: basal.
 
     Every default in this stage goes through here so the sites cannot drift
-    apart, and so they keep matching the convention stated in Appendix C.5.
+    apart and every default follows one convention.
     Cell types without basal in their set fall back to their first neurite
     label instead.
     """

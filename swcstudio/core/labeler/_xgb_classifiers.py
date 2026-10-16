@@ -33,7 +33,7 @@ XGBoost's own parameter and is NOT sklearn's ``min_samples_leaf``: sklearn
 counts samples in a leaf, XGBoost sums their hessians, which for a classifier
 are at most 0.25 apiece, so the same number means a much larger leaf here. It
 keeps XGBoost's name so the value is read as XGBoost defines it, and it is the
-quantity Appendix C.1 reports. ``device`` defaults to ``'cuda'``, which is how
+quantity Supplementary Section S2.1 reports. ``device`` defaults to ``'cuda'``, which is how
 the released models were fitted; pass ``device='cpu'`` to train without an
 NVIDIA GPU.
 """

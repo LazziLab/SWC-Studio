@@ -101,7 +101,7 @@ def train_correction_for_seed(pyramidal_dir: Path, seed: int, out_path: Path, *,
 
     The classifier's random state is 0 whatever seed is being built: the seed
     chooses which files are held out, and that is the whole of what separates
-    the three released corrections. Appendix C1 of the paper reports it so.
+    the three released corrections. Supplementary Section S2.1 of the paper reports it so.
     """
     from xgboost import XGBClassifier
     if recs is None:

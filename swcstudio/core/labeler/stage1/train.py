@@ -43,7 +43,7 @@ def train_stage1(train_files: dict[str, list[Path]], model_path: Path, workers: 
 
     The random state is 42 whatever corpus seed is being built. A seed selects
     which files are in the split, and that is the whole of what separates the
-    three released models; the fit itself is not re-randomised. Appendix C1 of
+    three released models; the fit itself is not re-randomised. Supplementary Section S2.1 of
     the paper reports it this way. ``device`` is where the fit runs: ``cuda``, as
     the released models were fitted, or ``cpu`` on a machine without an NVIDIA
     GPU. The saved model predicts on the CPU either way.
