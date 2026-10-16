@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PyInstaller.utils.hooks import (
     collect_data_files,
     collect_dynamic_libs,
@@ -26,8 +28,12 @@ def bundle_inputs() -> tuple[list, list, list[str]]:
     SWC-Studio source and model layers are staged after PyInstaller runs.
     """
     datas: list = []
+    # SWC-Studio's license and the notices for everything the app bundles.
+    root = Path(__file__).resolve().parents[1]
+    datas += [(str(root / "LICENSE"), "."), (str(root / "THIRD_PARTY_NOTICES.md"), ".")]
     datas += collect_data_files("vispy")
     datas += collect_data_files("xgboost", includes=["VERSION"])
+    # Each bundled package's metadata, which carries its license text.
     for distribution in (
         "neurom",
         "morphio",
@@ -37,6 +43,13 @@ def bundle_inputs() -> tuple[list, list, list[str]]:
         "xgboost",
         "zstandard",
         "pyzipper",
+        "numpy",
+        "scipy",
+        "pandas",
+        "joblib",
+        "pyqtgraph",
+        "PySide6",
+        "shiboken6",
     ):
         datas += copy_metadata(distribution)
 

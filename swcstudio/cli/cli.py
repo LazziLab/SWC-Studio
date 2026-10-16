@@ -467,9 +467,11 @@ def build_parser() -> argparse.ArgumentParser:
         prog="swcstudio",
         description=(
             "SWC-Studio CLI. Use direct commands such as 'validate', 'radii-clean', "
-            "'simplify', 'set-type', or 'connect'. Legacy grouped commands remain supported."
+            "'simplify', 'set-type', or 'connect'. Grouped commands are also available."
         ),
     )
+    from swcstudio import __version__  # noqa: PLC0415
+    p.add_argument("--version", action="version", version=f"swcstudio {__version__}")
     check = p.add_subparsers(dest="tool")
     check_cmd = check.add_parser("check", help="Print the GUI-style issue list for one SWC file")
     check_cmd.add_argument("file", type=Path)

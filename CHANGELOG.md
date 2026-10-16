@@ -23,11 +23,15 @@ follow [Semantic Versioning](https://semver.org/).
   (home directory written as `~`), where it was found, the labeler version
   and a SHA-256 of the model files. `history reproduce` uses them.
 - File → Reload from Disk.
+- `swcstudio --version` prints the installed version.
+- `THIRD_PARTY_NOTICES.md` lists the license of each package the stand-alone
+  apps bundle, among them Qt for Python under LGPL-3.0. The apps ship it with
+  `LICENSE` and each bundled package's own license files.
 
 ### Changed
 
 - Auto-labeling now runs the SWC auto-labeler v1.0.1
-  (<https://github.com/Mio0v0/swc-autolabeler>). It has four stages:
+  (<https://github.com/LazziLab/swc-autolabeler>). It has four stages:
   structural checks, cell class, subtree labeling with a learned branch
   correction, and a quality flag that ranks cells for review. You can choose
   the cell class or let Stage 1 decide it, and the Flag Review window lists
