@@ -240,6 +240,14 @@ jobs:
           draft: true
           files: artifacts/SWC-Studio-${{ steps.version.outputs.tag }}-macOS.zip
 
+      - name: Keep the macOS app as a run artifact (dry run)
+        uses: actions/upload-artifact@v4
+        if: github.event.inputs.dry_run == 'true'
+        with:
+          name: SWC-Studio-${{ steps.version.outputs.tag }}-macOS
+          path: artifacts/SWC-Studio-${{ steps.version.outputs.tag }}-macOS.zip
+          retention-days: 7
+
 
   # =========================================================================
   # 3. Windows modular .zip.
@@ -312,6 +320,14 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           draft: true
           files: artifacts/SWC-Studio-${{ steps.version.outputs.tag }}-Windows.zip
+
+      - name: Keep the Windows app as a run artifact (dry run)
+        uses: actions/upload-artifact@v4
+        if: github.event.inputs.dry_run == 'true'
+        with:
+          name: SWC-Studio-${{ steps.version.outputs.tag }}-Windows
+          path: artifacts/SWC-Studio-${{ steps.version.outputs.tag }}-Windows.zip
+          retention-days: 7
 
 
   # =========================================================================
