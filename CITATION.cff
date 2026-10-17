@@ -15,6 +15,15 @@ authors:
     family-names: Shi
     email: shixinra@usc.edu
     affiliation: "Institute for Technology and Medical Systems (ITEMS), and Ming Hsieh Department of Electrical and Computer Engineering, University of Southern California"
+  - given-names: Jean-Marie C.
+    family-names: Bouteiller
+    affiliation: "Institute for Technology and Medical Systems (ITEMS), and Alfred E. Mann Department of Biomedical Engineering, University of Southern California"
+  - given-names: Michael
+    family-names: Bienkowski
+    affiliation: "Department of Physiology and Neuroscience, Keck School of Medicine, University of Southern California"
+  - given-names: Gianluca
+    family-names: Lazzi
+    affiliation: "Institute for Technology and Medical Systems (ITEMS), University of Southern California"
 repository-code: "https://github.com/Mio0v0/SWC-Studio"
 url: "https://mio0v0.github.io/SWC-Studio/"
 keywords:
@@ -38,5 +47,5 @@ references:
         family-names: Bienkowski
       - given-names: Gianluca
         family-names: Lazzi
-    repository-code: "https://github.com/Mio0v0/swc-autolabeler"
+    repository-code: "https://github.com/LazziLab/swc-autolabeler"
     version: 1.0.1
