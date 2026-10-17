@@ -104,6 +104,10 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Validation stopped with "could not assign tuple of length 1 to structure
+  with 7 fields" on a file whose header holds a line that is not an SWC row,
+  such as the `autoset #bkg_thresh = 1` line Vaa3D's APP2 tracer writes. Such
+  lines are now skipped, as the file reader already skipped them.
 - Editing a copy of a tracked SWC took the original's history: the copy
   got the archive and the original's `<name>_history.swcstudio` was
   deleted. The copy now starts its own archive from the original's

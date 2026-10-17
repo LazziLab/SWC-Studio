@@ -176,8 +176,18 @@ class ValidationContext:
         return self._morph_error
 
 
+def _swc_rows_only(swc_text: str) -> str:
+    """The lines that are SWC rows: seven or more values once any ``#`` comment is cut.
+
+    Other lines are skipped, as ``swc_io.parse_swc_text_preserve_tokens`` skips
+    them, so a stray header line (Vaa3D writes ``autoset #bkg_thresh = 1``) does
+    not set the column count for the whole file.
+    """
+    return "\n".join(line for line in swc_text.splitlines() if len(line.split("#", 1)[0].split()) >= 7)
+
+
 def _load_swc_to_array(swc_text: str) -> np.ndarray:
-    buf = io.StringIO(swc_text)
+    buf = io.StringIO(_swc_rows_only(swc_text))
     arr = np.genfromtxt(
         buf,
         comments="#",
