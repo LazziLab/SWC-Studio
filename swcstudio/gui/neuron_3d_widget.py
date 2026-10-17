@@ -132,6 +132,9 @@ class Neuron3DWidget(QWidget):
             distance=500, elevation=30, azimuth=45, fov=45,
         )
         self._canvas.events.mouse_press.connect(self._on_mouse_press)
+        self._canvas.events.mouse_release.connect(self._on_mouse_release)
+        self._canvas.events.mouse_double_click.connect(self._on_mouse_double_click)
+        self._press_pos = None
 
         canvas_host = QWidget()
         canvas_layout = QGridLayout(canvas_host)
@@ -568,7 +571,29 @@ class Neuron3DWidget(QWidget):
             return int(best_child_id)
         return None
 
+    #: A press and release closer together than this (pixels) is a click; farther is a drag that rotates the view.
+    _CLICK_MAX_TRAVEL_PX = 5.0
+
     def _on_mouse_press(self, event):
+        # Only remember where the press happened: the camera handles the drag, and
+        # selection waits for the release so that rotating never selects a node.
+        button = getattr(event, "button", None)
+        self._press_pos = getattr(event, "pos", None) if button in (1, "left", None) else None
+
+    def _on_mouse_release(self, event):
+        start, self._press_pos = self._press_pos, None
+        if start is None:
+            return
+        end = getattr(event, "pos", start)
+        if float(np.hypot(end[0] - start[0], end[1] - start[1])) > self._CLICK_MAX_TRAVEL_PX:
+            return
+        node_id = self._nearest_node_id(end)
+        if node_id is None:
+            return
+        self.highlight_node(node_id)
+        self.node_clicked.emit(int(node_id))
+
+    def _on_mouse_double_click(self, event):
         button = getattr(event, "button", None)
         if button not in (1, "left", None):
             return
@@ -577,10 +602,6 @@ class Neuron3DWidget(QWidget):
             return
         self.zoom_to_node(node_id)
         self.node_clicked.emit(int(node_id))
-        try:
-            event.handled = True
-        except Exception:
-            pass
 
 
     # ------------------------------------------------- Line mode

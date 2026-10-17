@@ -104,6 +104,9 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- In the 3D view, starting a rotation near the tree selected the nearest
+  node and zoomed in. Dragging now only rotates the view; a click selects a
+  node without moving the camera, and a double-click zooms to it.
 - Validation stopped with "could not assign tuple of length 1 to structure
   with 7 fields" on a file whose header holds a line that is not an SWC row,
   such as the `autoset #bkg_thresh = 1` line Vaa3D's APP2 tracer writes. Such
