@@ -231,7 +231,7 @@ First public release.
   Python API.
 - Bundled desktop apps for macOS and Windows, and a documentation site.
 
-[Unreleased]: https://github.com/Mio0v0/SWC-Studio/compare/v0.2.1...HEAD
-[0.2.1]: https://github.com/Mio0v0/SWC-Studio/compare/v0.2.0...v0.2.1
-[0.2.0]: https://github.com/Mio0v0/SWC-Studio/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/Mio0v0/SWC-Studio/releases/tag/v0.1.0
+[Unreleased]: https://github.com/LazziLab/SWC-Studio/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/LazziLab/SWC-Studio/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/LazziLab/SWC-Studio/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/LazziLab/SWC-Studio/releases/tag/v0.1.0

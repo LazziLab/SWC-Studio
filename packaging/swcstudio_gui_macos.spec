@@ -68,7 +68,7 @@ app = BUNDLE(
     coll,
     name="SWC-Studio.app",
     icon=str(ICON_PATH) if ICON_PATH.exists() else None,
-    bundle_identifier="io.github.mio0v0.swcstudio",
+    bundle_identifier="io.github.lazzilab.swcstudio",
     info_plist={
         "CFBundleShortVersionString": APP_VERSION,
         "CFBundleVersion": APP_VERSION,

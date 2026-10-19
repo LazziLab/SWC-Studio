@@ -14,6 +14,7 @@ authors:
   - given-names: Xinran
     family-names: Shi
     email: shixinra@usc.edu
+    orcid: "https://orcid.org/0009-0007-0640-8700"
     affiliation: "Institute for Technology and Medical Systems (ITEMS), and Ming Hsieh Department of Electrical and Computer Engineering, University of Southern California"
   - given-names: Jean-Marie C.
     family-names: Bouteiller
@@ -24,8 +25,8 @@ authors:
   - given-names: Gianluca
     family-names: Lazzi
     affiliation: "Institute for Technology and Medical Systems (ITEMS), University of Southern California"
-repository-code: "https://github.com/Mio0v0/SWC-Studio"
-url: "https://mio0v0.github.io/SWC-Studio/"
+repository-code: "https://github.com/LazziLab/SWC-Studio"
+url: "https://lazzilab.github.io/SWC-Studio/"
 keywords:
   - neuroinformatics
   - neuronal morphology

@@ -41,7 +41,7 @@ The release lands as a draft visible only to repo maintainers, so you
 can review the auto-generated notes and double-check the assets
 before end users can download anything.
 
-1. Go to https://github.com/Mio0v0/SWC-Studio/releases
+1. Go to https://github.com/LazziLab/SWC-Studio/releases
 2. Find the draft release at the top (it has a "Draft" tag)
 3. Click into it, edit notes if you want, verify all 7 assets are present:
    - `swcstudio-code-v0.2.0.zip`
@@ -93,7 +93,7 @@ Trusted publishing avoids the need for a PYPI_API_TOKEN secret.
 1. Visit https://pypi.org/manage/account/publishing/
 2. Add a "GitHub" publisher with:
    - PyPI Project Name:  `swcstudio`
-   - Owner:              `Mio0v0`
+   - Owner:              `LazziLab`
    - Repository name:    `SWC-Studio`
    - Workflow filename:  `release.yml`
    - Environment name:   `pypi`

@@ -18,8 +18,8 @@ Both the CLI and GUI use the same core feature logic.
 
 Project documentation lives on the docs website:
 
-- Live docs: [https://mio0v0.github.io/SWC-Studio/](https://mio0v0.github.io/SWC-Studio/)
-- All releases: [https://github.com/Mio0v0/SWC-Studio/releases](https://github.com/Mio0v0/SWC-Studio/releases)
+- Live docs: [https://lazzilab.github.io/SWC-Studio/](https://lazzilab.github.io/SWC-Studio/)
+- All releases: [https://github.com/LazziLab/SWC-Studio/releases](https://github.com/LazziLab/SWC-Studio/releases)
 
 Use the docs site for:
 
@@ -46,7 +46,7 @@ Three supported install paths, depending on what you need.
 
 Use this path if you only need the desktop application and don't want to deal with Python.
 
-1. Open <https://github.com/Mio0v0/SWC-Studio/releases/latest>
+1. Open <https://github.com/LazziLab/SWC-Studio/releases/latest>
 2. Download `SWC-Studio-vX.Y.Z-macOS.zip` or `SWC-Studio-vX.Y.Z-Windows.zip` (X.Y.Z is the latest version)
 3. Extract and launch:
    - **macOS** (Apple silicon) — drag `SWC-Studio.app` into `/Applications`, then double-click. The app is not yet signed by Apple, so the first time macOS blocks it: open **System Settings → Privacy & Security**, click **Open Anyway** next to "SWC-Studio was blocked", and confirm. Or run `xattr -cr /Applications/SWC-Studio.app` once in Terminal. See [First launch on macOS](docs/GETTING_STARTED.md#first-launch-on-macos). On an Intel Mac, use Option 2.
@@ -56,7 +56,7 @@ The auto-labeling models are bundled inside the app, so no separate
 download is needed.
 
 Auto-labeling runs the SWC auto-labeler, version 1.0.1
-(<https://github.com/Mio0v0/swc-autolabeler>), on every file:
+(<https://github.com/LazziLab/swc-autolabeler>), on every file:
 
 1. **Structural checks** (Stage 0). The file must hold one connected
    cell with a soma, between 10 and 200,000 nodes, finite coordinates,
@@ -164,7 +164,7 @@ To upgrade later: `python -m pip install --upgrade swcstudio`.
 Use this path if you want to modify the swcstudio code itself. Supported Python versions: 3.10, 3.11, and 3.12.
 
 ```bash
-git clone https://github.com/Mio0v0/SWC-Studio.git
+git clone https://github.com/LazziLab/SWC-Studio.git
 cd SWC-Studio
 ```
 

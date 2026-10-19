@@ -5820,7 +5820,7 @@ class SWCMainWindow(QMainWindow):
         """Check GitHub Releases for a newer version and offer to install it.
 
         Probes the modular update manifest at
-        https://github.com/Mio0v0/SWC-Studio/releases/latest/download/update_manifest.json
+        https://github.com/LazziLab/SWC-Studio/releases/latest/download/update_manifest.json
         and reports any newer code/models layers. The user is offered a
         choice: install in-place (the modular updater downloads only the
         changed layer), or open the release page in a browser for a manual
@@ -5890,7 +5890,7 @@ class SWCMainWindow(QMainWindow):
             from PySide6.QtGui import QDesktopServices
             from PySide6.QtCore import QUrl
             QDesktopServices.openUrl(QUrl(
-                "https://github.com/Mio0v0/SWC-Studio/releases/latest"
+                "https://github.com/LazziLab/SWC-Studio/releases/latest"
             ))
             self._append_log("Opened release page in browser.", "INFO")
         # else: user cancelled

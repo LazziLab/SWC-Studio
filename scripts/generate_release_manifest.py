@@ -28,7 +28,7 @@ import hashlib
 import json
 from pathlib import Path
 
-GITHUB_REPO = "Mio0v0/SWC-Studio"
+GITHUB_REPO = "LazziLab/SWC-Studio"
 
 
 def _sha256(path: Path, chunk: int = 1 << 16) -> str:

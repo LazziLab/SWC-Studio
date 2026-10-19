@@ -1,7 +1,7 @@
 # Auto-Typing Engine
 
 `SWC-Studio` labels SWC files with the SWC auto-labeler, version 1.0.1
-(<https://github.com/Mio0v0/swc-autolabeler>). The CLI, the GUI and the
+(<https://github.com/LazziLab/swc-autolabeler>). The CLI, the GUI and the
 Python API all run the same labeler. It labels every node as soma, axon,
 basal dendrite or apical dendrite from the cell's geometry, so the input
 file does not need labels.

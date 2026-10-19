@@ -8,11 +8,11 @@ By taking part you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Getting help
 
-- Read the documentation at <https://mio0v0.github.io/SWC-Studio/> first.
+- Read the documentation at <https://lazzilab.github.io/SWC-Studio/> first.
   The Getting Started page and the CLI and GUI tutorials cover most
   questions.
 - For anything else, open an issue at
-  <https://github.com/Mio0v0/SWC-Studio/issues> and say what you are
+  <https://github.com/LazziLab/SWC-Studio/issues> and say what you are
   trying to do. Questions are fine as issues; there is no separate forum.
 
 ## Reporting a bug
@@ -43,7 +43,7 @@ first, and on Linux install the Qt system packages listed in the
 [README](README.md#linux-system-packages-options-2-and-3).
 
 ```bash
-git clone https://github.com/Mio0v0/SWC-Studio.git
+git clone https://github.com/LazziLab/SWC-Studio.git
 cd SWC-Studio
 python -m venv .venv
 source .venv/bin/activate            # Windows: .\.venv\Scripts\Activate.ps1
@@ -83,7 +83,7 @@ The CLI and the GUI share one backend, so most changes belong there:
 - `swcstudio/cli/` and `swcstudio/gui/`: thin front ends over the features.
 - `swcstudio/core/labeler/` is a copy of the SWC auto-labeler, synced by
   `scripts/sync_labeler.py`. Change the labeler in its own repository,
-  <https://github.com/Mio0v0/swc-autolabeler>, not here.
+  <https://github.com/LazziLab/swc-autolabeler>, not here.
 
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes the layers in more
 detail.

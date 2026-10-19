@@ -81,10 +81,10 @@ BUNDLE_FLAVOR_ENV = "SWCSTUDIO_BUNDLE_FLAVOR"
 # `update_manifest.json` asset, this 404s and the app falls back to the
 # /releases/latest API.
 DEFAULT_MANIFEST_URL = (
-    "https://github.com/Mio0v0/SWC-Studio/releases/latest/download/update_manifest.json"
+    "https://github.com/LazziLab/SWC-Studio/releases/latest/download/update_manifest.json"
 )
 GITHUB_LATEST_RELEASE_API = (
-    "https://api.github.com/repos/Mio0v0/SWC-Studio/releases/latest"
+    "https://api.github.com/repos/LazziLab/SWC-Studio/releases/latest"
 )
 
 
