@@ -26,7 +26,7 @@ Option 1 (the bundled app) ships its own Python runtime — no separate Python i
 
 Use this path if you only need the desktop application and don't want to deal with Python.
 
-1. open <https://github.com/Mio0v0/SWC-Studio/releases/latest>
+1. open <https://github.com/LazziLab/SWC-Studio/releases/latest>
 2. download `SWC-Studio-vX.Y.Z-macOS.zip` (Mac) or `SWC-Studio-vX.Y.Z-Windows.zip` (Windows)
 3. extract and launch:
    - **macOS** — drag `SWC-Studio.app` into `/Applications`, then double-click. First launch may need `xattr -cr /Applications/SWC-Studio.app` (or right-click → Open) because the bundle is not yet code-signed.
@@ -93,7 +93,7 @@ take effect on the next `python` run — no reinstall needed.
 Clone the repository:
 
 ```bash
-git clone https://github.com/Mio0v0/SWC-Studio.git
+git clone https://github.com/LazziLab/SWC-Studio.git
 cd SWC-Studio
 ```
 
@@ -155,7 +155,7 @@ How you update depends on how you installed:
 
 Internally, each release is split into three independent layers — runtime,
 code, and models — so most updates only re-fetch the small ones. See
-[`packaging/MODULAR_BUILD.md`](https://github.com/Mio0v0/SWC-Studio/blob/main/packaging/MODULAR_BUILD.md)
+[`packaging/MODULAR_BUILD.md`](https://github.com/LazziLab/SWC-Studio/blob/main/packaging/MODULAR_BUILD.md)
 for the architecture details.
 
 ## Verify installation

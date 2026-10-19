@@ -500,7 +500,7 @@ op:        auto_label
 input:     {sha256: ..., path: "neuron_001.swc"}
 output:    {sha256: ...}
 params:    {cell_type: unknown, flag_strictness: 0.5}
-model:     {sha256: ..., url: "https://github.com/Mio0v0/SWC-Studio/releases/download/v0.2.0/swcstudio-models-v0.2.0.zip"}
+model:     {sha256: ..., url: "https://github.com/LazziLab/SWC-Studio/releases/download/v0.2.0/swcstudio-models-v0.2.0.zip"}
 env_hash:  sha256:...
 command:   "swcstudio auto-label input.swc --cell-type unknown --flag-strictness 0.5"
 ```

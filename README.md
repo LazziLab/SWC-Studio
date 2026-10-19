@@ -18,8 +18,8 @@ Both the CLI and GUI use the same core feature logic.
 
 Project documentation lives on the docs website:
 
-- Live docs: [https://mio0v0.github.io/SWC-Studio/](https://mio0v0.github.io/SWC-Studio/)
-- All releases: [https://github.com/Mio0v0/SWC-Studio/releases](https://github.com/Mio0v0/SWC-Studio/releases)
+- Live docs: [https://lazzilab.github.io/SWC-Studio/](https://lazzilab.github.io/SWC-Studio/)
+- All releases: [https://github.com/LazziLab/SWC-Studio/releases](https://github.com/LazziLab/SWC-Studio/releases)
 
 Use the docs site for:
 
@@ -46,7 +46,7 @@ Three supported install paths, depending on what you need.
 
 Use this path if you only need the desktop application and don't want to deal with Python.
 
-1. Open <https://github.com/Mio0v0/SWC-Studio/releases/latest>
+1. Open <https://github.com/LazziLab/SWC-Studio/releases/latest>
 2. Download `SWC-Studio-v0.2.0-macOS.zip` or `SWC-Studio-v0.2.0-Windows.zip`
 3. Extract and launch:
    - **macOS** — drag `SWC-Studio.app` into `/Applications`, then double-click. First launch needs `xattr -cr /Applications/SWC-Studio.app` or right-click → Open (the bundle is not yet code-signed).
@@ -155,7 +155,7 @@ To upgrade later: `python -m pip install --upgrade swcstudio`.
 Use this path if you want to modify the swcstudio code itself. Supported Python versions: 3.10, 3.11, and 3.12.
 
 ```bash
-git clone https://github.com/Mio0v0/SWC-Studio.git
+git clone https://github.com/LazziLab/SWC-Studio.git
 cd SWC-Studio
 ```
 
