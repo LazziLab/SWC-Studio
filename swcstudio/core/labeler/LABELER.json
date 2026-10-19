@@ -2,7 +2,7 @@
   "name": "SWC auto-labeler",
   "version": "1.0.1",
   "source_repository": "https://github.com/LazziLab/swc-autolabeler",
-  "source_commit": "291acf7a494d079a150313338538ef61356e6f0c",
+  "source_commit": "3a0f0833822f332667ea906808be47ca9706309b",
   "source_model_set": "pipeline/models/seed123",
   "models_dir": "labeler-1.0.1",
   "models": {
