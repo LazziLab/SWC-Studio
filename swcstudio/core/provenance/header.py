@@ -109,24 +109,39 @@ def format_tip_line(
 # ----------------------------------------------------------------------
 
 
+_BOM = "\ufeff"
+
+
+def _without_bom(line: str) -> str:
+    # A UTF-8 file may start with a byte-order mark; it sits before the
+    # first @PROV line, which must still be recognised as ours.
+    return line[1:] if line.startswith(_BOM) else line
+
+
 def strip_prov_lines(data: bytes) -> bytes:
     """Return ``data`` with all existing ``# @PROV`` lines removed.
 
     Operates on raw bytes (not canonical form) so the result preserves
     every other byte exactly — line endings, trailing whitespace,
     float formatting, comment ordering. Only the @PROV lines, which
-    we own, are touched.
+    we own, are touched. A byte-order mark is kept at the start of the
+    result, whether it came before the header or, as an earlier version
+    wrote it, below it.
     """
     text = data.decode("utf-8")
+    had_bom = text.startswith(_BOM)
     out_lines: list[str] = []
     for line in text.splitlines(keepends=True):
         # ``startswith`` test against the raw line catches both ``\n``
         # and ``\r\n``-terminated variants because the prefix doesn't
         # contain a line terminator.
-        if line.lstrip().startswith(PROV_PREFIX):
+        if _without_bom(line).lstrip().startswith(PROV_PREFIX):
             continue
         out_lines.append(line)
-    return "".join(out_lines).encode("utf-8")
+    body = "".join(out_lines)
+    if had_bom and not body.startswith(_BOM):
+        body = _BOM + body
+    return body.encode("utf-8")
 
 
 def write_prov_header(
@@ -141,12 +156,20 @@ def write_prov_header(
     accumulate stale chains). Other comment lines and data rows are
     preserved bit-for-bit.
 
-    The output always uses ``\\n`` after each header line. The body's
-    line endings are not touched — we only own the bytes we wrote.
+    The header lines end like the body's first line (``\\r\\n`` in a CRLF
+    file, else ``\\n``), and a byte-order mark stays the first bytes of
+    the file, before the header; other readers would otherwise see it in
+    the middle of the file. The body's bytes are not touched.
     """
+    bom = _BOM.encode("utf-8")
     body = strip_prov_lines(data)
-    header = (root_line + "\n" + tip_line + "\n").encode("utf-8")
-    return header + body
+    had_bom = body.startswith(bom)
+    if had_bom:
+        body = body[len(bom):]
+    first_break = body.find(b"\n")
+    eol = "\r\n" if first_break > 0 and body[first_break - 1:first_break] == b"\r" else "\n"
+    header = (root_line + eol + tip_line + eol).encode("utf-8")
+    return (bom if had_bom else b"") + header + body
 
 
 # ----------------------------------------------------------------------
@@ -170,7 +193,7 @@ def parse_prov_header(data: bytes) -> ProvHeader:
     root: dict[str, str] | None = None
     tip: dict[str, str] | None = None
     for line in text.splitlines():
-        s = line.strip()
+        s = _without_bom(line).strip()
         if not s.startswith(PROV_PREFIX):
             continue
         kvs = dict(_KV_RE.findall(s))

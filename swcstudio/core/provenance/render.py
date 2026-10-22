@@ -203,7 +203,7 @@ def render_env_text(env_blob: dict[str, Any]) -> str:
 
     Shows the system block in full and a compact summary of the
     packages block (count + a handful of high-signal entries:
-    numpy, scipy, sklearn, torch, swcstudio). The full per-package
+    numpy, scipy, sklearn, xgboost, swcstudio). The full per-package
     list is in the blob — reachable via --format=json.
     """
     out: list[str] = []
@@ -218,8 +218,8 @@ def render_env_text(env_blob: dict[str, Any]) -> str:
     if pkgs:
         out.append(f"packages: ({len(pkgs)} total)")
         # Highlight the ones that matter most for reproducibility.
-        for name in ("numpy", "scipy", "scikit-learn", "torch",
-                     "torch-geometric", "morphio", "neurom", "swcstudio"):
+        for name in ("numpy", "scipy", "scikit-learn", "xgboost",
+                     "pandas", "morphio", "neurom", "swcstudio"):
             if name in pkgs:
                 out.append(f"  {name}: {pkgs[name]}")
         out.append(f"  …and {len(pkgs) - 8} other packages (use --format=json for full list)")

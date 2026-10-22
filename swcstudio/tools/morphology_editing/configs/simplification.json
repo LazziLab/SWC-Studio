@@ -4,6 +4,7 @@
   "flags": {
     "keep_bifurcations": true,
     "keep_roots": true,
+    "keep_soma": true,
     "keep_tips": true
   },
   "method": "default",

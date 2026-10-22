@@ -18,35 +18,46 @@ So GUI Batch tab, GUI Validation tab, and CLI all use one core behavior.
 
 ## What counts as abnormal
 
-The current cleaner treats the SWC as directed paths instead of a flat node list.
+The cleaner changes a radius only when it is certainly wrong, by one of
+three tests:
 
-It looks for:
+1. **Invalid:** zero, negative, or not a number (`NaN`, `inf`).
+2. **Implausible:** above its type's plausible maximum (axon 5 µm, basal
+   dendrite 8 µm, apical dendrite 10 µm, other neurite types 10 µm). The
+   ranges are fixed, so a file whose radii are mostly wrong cannot widen
+   them.
+3. **An isolated spike or dip:** more than 3 times thicker or thinner than
+   the median of its plausible neighbours on both sides along the branch
+   (2 upstream, 2 downstream). On 1,500 expert-traced cells, 99% of radii
+   lie within x1.9 of their neighbours and 0.5% beyond x3, so natural
+   variation is left alone.
 
-- non-positive radii (`<= 0`)
-- non-finite radii (`NaN`, `inf`)
-- local single-node spikes relative to a 5-node path window
-- radii that violate configured sanity bounds
-- branch points that become thicker distally than biologically expected
+Every other radius is kept as it is, including placeholders such as 0.004
+unless one sits alone among real values. Each changed node records the test
+it failed.
 
 ## Triple-pass refinement
 
 The current cleaner follows a path-aware three-pass method:
 
 1. `Local outlier repair`
-   - uses a 5-node neighborhood (`2` upstream, `2` downstream)
-   - computes the local median radius
-   - flags a node when `|R_current - R_median| / R_median > 0.5`
-   - immediately replaces the flagged radius with the local median or a topology-based fallback
-2. `Global taper enforcement`
-   - walks each branch segment from soma/proximal anchor toward the leaf
-   - enforces `R_i <= R_(i-1) * (1 + slack)`
-   - default taper slack is `0.05`
-   - axons can also enforce a minimum floor radius
+   - uses a 5-node neighborhood (`2` upstream, `2` downstream), plausible
+     radii only, and needs a neighbour on each side
+   - flags a node when `R_current > 3 * R_median` or `R_current < R_median / 3`
+     (`local_outlier.max_ratio`), and every invalid or implausible radius
+   - replaces the flagged radius with the local median or a topology-based fallback
+2. `Taper enforcement` (off by default)
+   - when `taper.enabled` is on: walks each branch from the soma toward the
+     tips and enforces `R_i <= R_(i-1) * (1 + slack)` (slack `0.05`)
+   - off by default because real dendrites do not taper monotonically:
+     the cap changed correct radii, and one thin node thinned everything
+     distal to it
+   - axons can also enforce a minimum floor radius (`axon_floor`, off by
+     default)
 3. `Savitzky-Golay-style smoothing`
-   - uses a local quadratic fit on each directed path
-   - default window is `7` nodes
-   - default polynomial order is `2`
-   - smoothing runs after spike repair and taper enforcement, then taper is re-enforced once
+   - refines the replacement value of flagged nodes only, with a local
+     quadratic fit over their plausible neighbours
+   - default window is `7` nodes, polynomial order `2`
 
 ## Key config file
 
@@ -61,26 +72,28 @@ Validation radii cleaning is a thin wrapper over the same backend and can layer 
 Under `rules`:
 
 - soma radii are always preserved during radii cleaning
-- `small_radius_zero_only`: only treat very small values as abnormal if they are zero
-- `sanity_bounds.global.lower_percentile`
-- `sanity_bounds.global.upper_percentile`
-- `sanity_bounds.global.lower_abs`
-- `sanity_bounds.global.upper_abs`
-- `sanity_bounds.per_type`: per-type overrides
+- `small_radius_zero_only`: only treat very small values as abnormal if they
+  are zero (default `true`; a small value can still be a local outlier)
+- `sanity_bounds.default`: plausible range for types without their own entry
+  - `min_radius` (default `0.05`), `max_radius` (default `10`)
+- `sanity_bounds.per_type`: plausible range per node type, keyed by type
+  name or ID (with `type_id`)
   - `enabled`
-  - `lower_percentile`
-  - `upper_percentile`
-  - `lower_abs`
-  - `upper_abs`
+  - `min_radius`, `max_radius` (µm): axon `0.05`–`5`, basal dendrite
+    `0.05`–`8`, apical dendrite `0.05`–`10`
+  - configs from earlier versions with `lower_abs`/`upper_abs` still work;
+    their percentile keys are ignored
 - `local_outlier.enabled`
 - `local_outlier.window_nodes`
   - default: `5`
-- `local_outlier.max_percent_deviation`
-  - default: `0.5`
+- `local_outlier.max_ratio`
+  - default: `3` (replaces `max_percent_deviation`)
 - `taper.enabled`
+  - default: `false`
 - `taper.slack`
   - default: `0.05`
 - `axon_floor.enabled`
+  - default: `false` (many real axons are thinner than 0.12 µm)
 - `axon_floor.min_radius`
   - default: `0.12`
 - `savgol.enabled`
@@ -108,7 +121,7 @@ swcstudio radii-clean cell.swc
 Clean one file while overriding rules for this run:
 
 ```bash
-swcstudio radii-clean cell.swc --config-json '{"rules":{"local_outlier":{"max_percent_deviation":0.4}}}'
+swcstudio radii-clean cell.swc --config-json '{"rules":{"local_outlier":{"max_ratio":2.5}}}'
 ```
 
 Validation command path (same backend):

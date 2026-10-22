@@ -1,68 +1,54 @@
-"""Auto-typing engine for swcstudio (v12 QC-label-flag pipeline).
+"""Auto-typing engine for swcstudio.
 
-This package is the single auto-labeling backend used everywhere in
-swcstudio. It runs a four-stage pipeline that classifies every node in
-an SWC into soma / axon / basal dendrite / apical dendrite:
+This package is the single auto-labeling backend used everywhere in swcstudio.
+It runs the SWC auto-labeler (``swcstudio.core.labeler``, a copy of the released
+labeler's code, with its model set ``labeler-<version>``), which labels every
+node of an SWC file as soma, axon, basal dendrite or apical dendrite:
 
-* Stage 1: cell-type detector (sklearn ensemble, 49 whole-cell
-  features) decides pyramidal vs interneuron.
-* Stage 2: per-subtree axon/basal/apical classifier (sklearn
-  ensemble), propagated to all branches in the same primary subtree.
-* Stage 2b: GraphSAGE GNN over the branch graph re-decides
-  apical-vs-basal for pyramidal dendrite branches.
-* Stage 3: topology refinement plus conservative Branch3 rescue.
-* QC/flag: runtime QC metadata and learned per-cell bad-label flag.
+* Stage 0: structural checks (one connected cell, a soma, finite geometry).
+* Stage 1: the cell class, 3-class (axon, basal, apical) or 2-class (axon,
+  dendrite), unless the user chooses it.
+* Stage 2: a gradient-boosted classifier labels each primary subtree.
+* Stage 3: topology rules, and for 3-class cells a learned correction of the
+  branches near the soma.
+* Stage 4: a quality flag per cell class that predicts each cell's per-cell F1,
+  so a curator can review the riskiest cells first.
 
-The core stages are required. The package's required dependencies
-include sklearn, XGBoost, torch, and torch_geometric. Published wheels
-and source installs ship the trained model files for the pipeline and
-flag scorer.
-
-End users typically reach this code through the CLI (``swcstudio
-validation auto-label``, ``swcstudio batch auto-typing``) or through
-the GUI's Validation / Batch panels. They rarely import these modules
-directly.
-
-The model files are resolved via :mod:`swcstudio.core.model_paths` —
-override location with ``--model-dir``, ``SWCSTUDIO_MODEL_DIR``, or the
-GUI selector.
+End users reach this code through the CLI (``swcstudio auto-label``,
+``swcstudio auto-typing``) or the GUI's Auto Label Editing panels and the Flag
+Review window. The model folder is resolved by :mod:`swcstudio.core.model_paths`;
+name one with ``--model-dir`` or the GUI selector, ``SWCSTUDIO_MODEL_DIR``, or
+``model_dir`` in the auto-typing configuration, in that order of precedence.
 """
 from __future__ import annotations
 
 import warnings as _warnings
 
-# Silence sklearn's InconsistentVersionWarning for the bundled pickles.
-# The package pins ``scikit-learn>=1.5,<1.6``, so any mismatch with the
-# trained-on version is patch-level only (e.g. 1.5.1 trained vs 1.5.2
-# installed), which sklearn keeps wire-compatible. The warning is
-# noisy — sklearn fires it once per estimator inside a pickled bundle,
-# so users would see ~10 identical messages on the first auto-label
-# run — and is not actionable at the patch level. A real cross-minor
-# mismatch would already raise an ``ImportError`` from a missing C
-# symbol, not this warning, so suppressing it doesn't hide real bugs.
+# Silence sklearn's InconsistentVersionWarning for the bundled pickles. The
+# package pins ``scikit-learn>=1.5,<1.6``, so any mismatch with the trained-on
+# version is patch-level only, which sklearn keeps wire-compatible; sklearn would
+# otherwise warn once per estimator inside each bundle.
 try:
     from sklearn.exceptions import InconsistentVersionWarning as _InconsistentVersionWarning  # noqa: PLC0415
     _warnings.filterwarnings("ignore", category=_InconsistentVersionWarning)
 except ImportError:  # pragma: no cover - sklearn is a required dep
     pass
 
+from .cell_class import CELL_CLASS_DESCRIPTIONS, CELL_CLASS_NAMES, cell_class_name, normalize_cell_class
 from .config import DEFAULT_CONFIG, get_config, save_config
 from .runner import (
+    FLAG_REVIEW_CSV,
+    FLAG_REVIEW_JSON,
+    apply_flag_budget,
     backend_status,
     is_available,
+    labeled_text,
+    resolve_models,
     run_batch,
     run_file,
+    write_flag_review,
 )
 from .types import BatchOptions, BatchResult, FileResult
-
-# Pipeline-level entry points (used by callers that have already parsed
-# SWC into the internal SWCNode representation, e.g. research code).
-from .features import SWCNode, parse_swc  # noqa: F401
-from .pipeline import (  # noqa: F401
-    PipelineResult,
-    run_pipeline,
-    run_pipeline_on_nodes,
-)
 
 
 def run_folder(folder: str, opts: BatchOptions | None = None) -> BatchResult:
@@ -74,17 +60,22 @@ __all__ = [
     "BatchOptions",
     "BatchResult",
     "FileResult",
+    "CELL_CLASS_NAMES",
+    "CELL_CLASS_DESCRIPTIONS",
+    "cell_class_name",
+    "normalize_cell_class",
     "DEFAULT_CONFIG",
     "get_config",
     "save_config",
     "is_available",
+    "resolve_models",
     "backend_status",
+    "labeled_text",
     "run_file",
     "run_batch",
     "run_folder",
-    "SWCNode",
-    "parse_swc",
-    "PipelineResult",
-    "run_pipeline",
-    "run_pipeline_on_nodes",
+    "apply_flag_budget",
+    "write_flag_review",
+    "FLAG_REVIEW_JSON",
+    "FLAG_REVIEW_CSV",
 ]

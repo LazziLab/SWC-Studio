@@ -162,6 +162,10 @@ set SWCSTUDIO_PLUGINS=my_lab_plugin
 - Fix: compare:
   - `register_method(<feature_key>, <method_name>, ...)`
   - CLI `--config-json '{"method":"<method_name>"}'`
+- For `batch_processing.auto_typing`, `batch_auto_typing` and the
+  `auto-typing` command always run the built-in auto-labeler and do not
+  read a `method` key. Call your method through `resolve_method`, as in
+  step 6.
 
 ## Notes for GUI Users
 

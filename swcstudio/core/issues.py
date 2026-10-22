@@ -54,6 +54,28 @@ class Issue:
         return asdict(self)
 
 
+_DUPLICATE_ID_FIX = (
+    "Two or more rows share a node ID, so a parent ID that names it could mean either row. "
+    "Give every row its own ID by renumbering or removing the duplicated rows in the SWC file, "
+    "then reload it. Index Clean and the geometry edits refuse the file until then, because "
+    "they cannot tell which row a parent ID means."
+)
+
+_MISSING_PARENT_FIX = (
+    "These nodes name a parent ID that is not in the file, often because the file was "
+    "truncated or rows were deleted by hand. In Geometry Editing, reconnect each node to its "
+    "real parent, or restore the missing rows in the SWC file. Index Clean and Split refuse "
+    "the file until then."
+)
+
+_PARENT_CYCLE_FIX = (
+    "These nodes' parent IDs loop back on themselves (for example A's parent is B and B's "
+    "parent is A), so they never reach the soma or another root. In Geometry Editing, "
+    "disconnect one link on the loop, then reconnect the freed node to its real parent. "
+    "Index Clean refuses the file until the cycle is gone."
+)
+
+
 def _severity_from_validation_row(row: dict[str, Any]) -> str:
     status = str(row.get("status", "")).strip().lower()
     if status == "fail":
@@ -77,6 +99,35 @@ def _blocked_reason_from_validation_row(row: dict[str, Any]) -> dict[str, str] |
         return None
 
     last_line = lines[-1]
+    # ValidationContext refuses to build a morphology for these two, with a
+    # reason the user can act on; see ValidationContext._morphology_blocker.
+    if "duplicate node ids:" in last_line.lower():
+        return {
+            "code": "duplicate_node_ids",
+            "title": "Checks blocked by duplicate node IDs",
+            "reason": "duplicate node IDs",
+            "domain": "index",
+            "tool_target": "validation",
+            "suggested_fix": _DUPLICATE_ID_FIX,
+        }
+    if "missing parent:" in last_line.lower():
+        return {
+            "code": "missing_parents",
+            "title": "Checks blocked by missing parent nodes",
+            "reason": "missing parent nodes",
+            "domain": "geometry",
+            "tool_target": "geometry_editing",
+            "suggested_fix": _MISSING_PARENT_FIX,
+        }
+    if "parent cycle:" in last_line.lower():
+        return {
+            "code": "parent_cycles",
+            "title": "Checks blocked by parent cycles",
+            "reason": "a parent cycle",
+            "domain": "geometry",
+            "tool_target": "geometry_editing",
+            "suggested_fix": _PARENT_CYCLE_FIX,
+        }
     if last_line.lower().startswith("unsupported section type:"):
         section_type = last_line.split(":", 1)[-1].strip() or "unknown"
         return {
@@ -108,6 +159,7 @@ def validation_prerequisite_summary(report: dict[str, Any] | None) -> dict[str, 
         "blocked_reasons": [],
         "soma_gate_failed": False,
         "multiple_somas_failed": False,
+        "duplicate_node_ids_failed": False,
     }
     if not isinstance(report, dict):
         return summary
@@ -124,6 +176,8 @@ def validation_prerequisite_summary(report: dict[str, Any] | None) -> dict[str, 
             summary["soma_gate_failed"] = True
         if str(row.get("key", "")).strip() == "multiple_somas":
             summary["multiple_somas_failed"] = True
+        if str(row.get("key", "")).strip() == "no_duplicate_node_ids":
+            summary["duplicate_node_ids_failed"] = True
         blocked = _blocked_reason_from_validation_row(row)
         if not blocked:
             continue
@@ -171,6 +225,13 @@ def _tool_target_for_key(key: str) -> tuple[str, str, str]:
         "no_extreme_spatial_jump",
     }
 
+    # Before the geometry keys: the generic geometry advice does not fit these.
+    if key == "no_duplicate_node_ids":
+        return ("index", "validation", _DUPLICATE_ID_FIX)
+    if key == "no_parent_cycles":
+        return ("geometry", "geometry_editing", _PARENT_CYCLE_FIX)
+    if key == "no_missing_parents":
+        return ("geometry", "geometry_editing", _MISSING_PARENT_FIX)
     if key in radii_keys:
         return ("radii", "manual_radii", "Use Manual Radii Editing to inspect and set individual node radii, or Auto Radii Editing for broader cleanup.")
     if key in label_keys:
@@ -191,7 +252,7 @@ def _tool_target_for_key(key: str) -> tuple[str, str, str]:
         return (
             "structure",
             "",
-            "Complex soma format must be resolved before the rest of the validation pipeline can continue.",
+            "Use Consolidate Soma to merge each connected soma group into one node. The other checks already ran on a merged working copy.",
         )
     if key == "multiple_somas":
         return (
@@ -456,8 +517,10 @@ def _type_suspicion_from_dataframe(
         with tempfile.NamedTemporaryFile(prefix="swcstudio_issue_type_", suffix=".swc", delete=False) as tmp:
             tmp.write(write_swc_to_bytes_preserve_tokens(df))
             tmp_path = Path(tmp.name)
+        # Only the labels are compared here, so the quality flag is not scored.
         result_obj = run_validation_auto_typing_file(
             str(tmp_path),
+            config_overrides={"flag_enabled": False},
             write_output=False,
             write_log=False,
         )
@@ -480,8 +543,8 @@ def compute_type_suspicion_issues(df: pd.DataFrame | None) -> list[dict[str, Any
     """Run the auto-typing engine on ``df`` and return the ``Likely wrong
     labels`` issues. Exposed separately so callers (typically the GUI)
     can run it on a worker thread instead of blocking the issue panel
-    while the full v12 QC-label-flag pipeline runs on
-    the morphology — which can take seconds on large cells.
+    while the auto-labeler runs on the morphology — which can take
+    seconds on large cells.
     """
     if df is None or df.empty:
         return []
@@ -544,7 +607,7 @@ def build_issue_list(
         base_issues = filtered_base_issues
 
     prereq = validation_prerequisite_summary(validation_report)
-    hard_blocked = bool(prereq.get("soma_gate_failed")) or bool(prereq.get("multiple_somas_failed"))
+    hard_blocked = bool(prereq.get("multiple_somas_failed"))
     critical_radii_node_ids = {
         int(node_id)
         for item in base_issues
@@ -553,7 +616,14 @@ def build_issue_list(
     }
 
     suspicious_radii: list[dict[str, Any]] = []
-    if not hard_blocked and not prereq.get("unsupported_section_types") and not prereq.get("missing_soma"):
+    # The radii suggestions are keyed by node ID, which a duplicate ID makes
+    # ambiguous, so skip them until every row has its own ID.
+    if (
+        not hard_blocked
+        and not prereq.get("unsupported_section_types")
+        and not prereq.get("missing_soma")
+        and not prereq.get("duplicate_node_ids_failed")
+    ):
         suspicious_radii = issues_from_radii_suspicion(df, ignore_node_ids=critical_radii_node_ids)
 
     computed_type_suspicious: list[dict[str, Any]] = list(type_suspicious or [])

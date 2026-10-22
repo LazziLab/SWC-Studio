@@ -7,14 +7,16 @@ automated by `.github/workflows/release.yml`.
 ## Quick recipe
 
 ```bash
-# 1. Bump the version locally (one source of truth → updater + pyproject)
+# 1. Bump the version locally (one source of truth → updater, pyproject, CITATION.cff)
 python scripts/stamp_version.py --version 0.2.0
+#    Then set date-released in CITATION.cff and move the Unreleased
+#    entries in CHANGELOG.md under the new version.
 
 # 2. Verify the bump took effect
 python scripts/stamp_version.py --version 0.2.0 --check
 
 # 3. Commit + push
-git add pyproject.toml swcstudio/core/updater.py
+git add pyproject.toml swcstudio/core/updater.py CITATION.cff CHANGELOG.md
 git commit -m "Bump version to 0.2.0"
 git push origin <your-branch>
 
@@ -28,7 +30,7 @@ GitHub Actions will then:
 1. Build and inspect the layer zips, pip wheel, and `update_manifest.json`
 2. Install the wheel into empty environments on Windows, macOS, and
    Linux for Python 3.10, 3.11, and 3.12
-3. Deserialize every production model and run GUI/inference smoke tests
+3. Deserialize each auto-labeler model file and run GUI and auto-labeling smoke tests
 4. Build the modular macOS `.app` and modular Windows `.zip`
 5. Create a **draft** GitHub Release `v0.2.0` and attach all assets
 6. (Gated) Publish the wheel to PyPI
@@ -66,12 +68,12 @@ For a tag `v0.2.0`, the workflow attaches these assets to the release:
 
 | Asset                                  | Audience                          | Size  |
 |----------------------------------------|-----------------------------------|-------|
-| `swcstudio-code-v0.2.0.zip`            | Modular desktop users (code update) | ~5 MB |
-| `swcstudio-models-v0.2.0.zip`          | Modular desktop model updates     | ~75-80 MB raw model files |
+| `swcstudio-code-v0.2.0.zip`            | Modular desktop users (code update; no models) | ~0.5 MB |
+| `swcstudio-models-v0.2.0.zip`          | Modular desktop model updates (the `labeler-<version>/` folder) | ~25 MB (about 50 MB of model files) |
 | `SWC-Studio-v0.2.0-macOS.zip`          | New / runtime-bumping Mac users   | varies by runtime |
 | `SWC-Studio-v0.2.0-Windows.zip`        | New / runtime-bumping Win users   | varies by runtime |
-| `swcstudio-0.2.0-py3-none-any.whl`     | pip users; includes production models | ~38 MB |
-| `swcstudio-0.2.0.tar.gz`               | pip users (sdist fallback); includes models | ~38 MB |
+| `swcstudio-0.2.0-py3-none-any.whl`     | pip users; includes the auto-labeler models | ~26 MB |
+| `swcstudio-0.2.0.tar.gz`               | pip users (sdist fallback); includes the models | ~26 MB |
 | `update_manifest.json`                 | the in-app updater                | ~1 KB |
 
 The `update_manifest.json` is the key file that ties everything
@@ -113,7 +115,7 @@ be attached to the GitHub Release.
 Use `workflow_dispatch` to test without tagging:
 
 1. Go to Actions -> Release -> Run workflow
-2. Set `version` to e.g. `0.2.0-test`
+2. Set `version` to a valid PEP 440 pre-release, e.g. `0.3.0rc1` (`0.2.0-test` is rejected by the build)
 3. Set `dry_run` to `true`
 
 The workflow builds all the artifacts but skips upload to GitHub
@@ -133,8 +135,8 @@ git tag vX.Y.Z
 **macOS build fails with "developer cannot be verified"**
 The released `.app` is unsigned. Users will see the Gatekeeper warning on first launch. Solutions in order of effort:
 
-* Tell users: right-click .app -> Open the first time
-* Or in their Terminal: `xattr -cr SWC-Studio.app`
+* Tell users: System Settings -> Privacy & Security -> Open Anyway the first time (macOS 15 dropped right-click -> Open); see docs/GETTING_STARTED.md#first-launch-on-macos
+* Or in their Terminal: `xattr -cr /Applications/SWC-Studio.app`
 * Long-term fix: Apple Developer ID + notarization (~$99/yr)
 
 **PyPI publish fails with "trusted publisher not configured"**

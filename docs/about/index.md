@@ -66,7 +66,7 @@ Those tools cover:
 The documentation is organized around the current application behavior:
 
 - `User Guide`
-  - setup, issue-driven workflows, validation, custom types, outputs
+  - setup, issue-driven workflows, validation, auto-labeling and flag review, custom types, outputs
 - `Tutorials`
   - guided end-to-end examples for GUI and CLI usage
 - `Reference`

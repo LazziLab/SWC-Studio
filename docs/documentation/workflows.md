@@ -118,7 +118,9 @@ the CLI writes:
 
 Mutating batch commands record each processed source SWC in place. Text
 reports remain for validation/report-only commands, and split/checkpoint
-commands intentionally materialize separate SWC files.
+commands intentionally materialize separate SWC files. Batch
+auto-labeling with the quality flag on also writes a flag review that
+ranks the cells for review; see [Reviewing Flagged Cells](auto-typing-backends.md#reviewing-flagged-cells).
 
 ## Recommended reading
 

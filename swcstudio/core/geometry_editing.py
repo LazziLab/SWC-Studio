@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, asdict
 from typing import Any
 
@@ -27,8 +29,226 @@ class GeometrySelection:
         return out
 
 
+# swc_io's original number text. Carrying it through an edit lets a save
+# rewrite only the values the edit changed; the header rides in df.attrs.
+_TOKEN_COLS = ["x_str", "y_str", "z_str", "radius_str", "id_str", "parent_str"]
+
+
 def _df_copy(df: pd.DataFrame) -> pd.DataFrame:
-    return df.loc[:, SWC_COLS].copy()
+    cols = SWC_COLS + [c for c in _TOKEN_COLS if c in df.columns]
+    out = df.loc[:, cols].copy()
+    out.attrs = dict(df.attrs)
+    return out
+
+
+def _append_row(df: pd.DataFrame, row: dict[str, Any]) -> pd.DataFrame:
+    out = pd.concat([df, pd.DataFrame([row], columns=SWC_COLS)], ignore_index=True)
+    out.attrs = dict(df.attrs)
+    return out
+
+
+def duplicate_node_ids(ids: Iterable[int]) -> list[int]:
+    """Sorted node IDs that appear on more than one row."""
+    counts = Counter(int(v) for v in ids)
+    return sorted(node_id for node_id, count in counts.items() if count > 1)
+
+
+def _strongly_connected_components(nodes: list[int], succ: dict[int, set[int]]) -> list[list[int]]:
+    """Tarjan's algorithm, iterative so deep trees cannot overflow the stack."""
+    index: dict[int, int] = {}
+    low: dict[int, int] = {}
+    on_stack: set[int] = set()
+    stack: list[int] = []
+    components: list[list[int]] = []
+    counter = 0
+    for root in nodes:
+        if root in index:
+            continue
+        index[root] = low[root] = counter
+        counter += 1
+        stack.append(root)
+        on_stack.add(root)
+        work = [(root, iter(sorted(succ.get(root, ()))))]
+        while work:
+            node, successors = work[-1]
+            descended = False
+            for nxt in successors:
+                if nxt not in index:
+                    index[nxt] = low[nxt] = counter
+                    counter += 1
+                    stack.append(nxt)
+                    on_stack.add(nxt)
+                    work.append((nxt, iter(sorted(succ.get(nxt, ())))))
+                    descended = True
+                    break
+                if nxt in on_stack:
+                    low[node] = min(low[node], index[nxt])
+            if descended:
+                continue
+            work.pop()
+            if work:
+                caller = work[-1][0]
+                low[caller] = min(low[caller], low[node])
+            if low[node] == index[node]:
+                component: list[int] = []
+                while True:
+                    member = stack.pop()
+                    on_stack.discard(member)
+                    component.append(member)
+                    if member == node:
+                        break
+                components.append(component)
+    return components
+
+
+def parent_cycles(
+    ids: Iterable[int],
+    parents: Iterable[int],
+    *,
+    include_self_loops: bool = False,
+) -> list[list[int]]:
+    """Return every closed parent chain as a sorted list of node IDs.
+
+    Following parent IDs from a node on a cycle never reaches a root, so the
+    cycle and everything below it are cut off from the cell. A node that is
+    its own parent is a cycle of one; it is left out unless
+    ``include_self_loops`` is set. Parent IDs that name no row end a chain.
+    Duplicate IDs are allowed: an ID then has one parent link per row.
+    """
+    id_list = [int(v) for v in ids]
+    parent_list = [int(v) for v in parents]
+    present = set(id_list)
+    succ: dict[int, set[int]] = {}
+    for node_id, parent_id in zip(id_list, parent_list):
+        if parent_id in present:
+            succ.setdefault(node_id, set()).add(parent_id)
+
+    cycles: list[list[int]] = []
+    if all(len(targets) == 1 for targets in succ.values()):
+        # Unique parent per ID: walk each chain once.
+        parent_of = {node_id: next(iter(targets)) for node_id, targets in succ.items()}
+        done: set[int] = set()
+        for start in id_list:
+            if start in done:
+                continue
+            path: list[int] = []
+            position: dict[int, int] = {}
+            node: int | None = start
+            while node is not None and node not in done and node not in position:
+                position[node] = len(path)
+                path.append(node)
+                node = parent_of.get(node)
+            if node is not None and node in position:
+                cycles.append(sorted(path[position[node]:]))
+            done.update(path)
+    else:
+        for component in _strongly_connected_components(sorted(present), succ):
+            if len(component) > 1 or component[0] in succ.get(component[0], set()):
+                cycles.append(sorted(component))
+
+    if not include_self_loops:
+        cycles = [cycle for cycle in cycles if len(cycle) > 1]
+    cycles.sort(key=lambda cycle: cycle[0])
+    return cycles
+
+
+def nodes_cut_off_by_cycles(ids: Iterable[int], parents: Iterable[int], cycles: list[list[int]]) -> list[int]:
+    """Sorted IDs on a cycle or below one: their parent chain never reaches a root."""
+    cycle_ids = {int(v) for cycle in cycles for v in cycle}
+    if not cycle_ids:
+        return []
+    children: dict[int, list[int]] = {}
+    for node_id, parent_id in zip((int(v) for v in ids), (int(v) for v in parents)):
+        if parent_id != node_id:
+            children.setdefault(parent_id, []).append(node_id)
+    seen = set(cycle_ids)
+    stack = list(cycle_ids)
+    while stack:
+        for child in children.get(stack.pop(), []):
+            if child not in seen:
+                seen.add(child)
+                stack.append(child)
+    return sorted(seen)
+
+
+def format_id_list(node_ids: list[int], limit: int = 10) -> str:
+    """'4', '4 and 7', '4, 7 and 9'; past ``limit`` IDs, '... and N more'."""
+    shown = [str(int(v)) for v in node_ids[:limit]]
+    extra = len(node_ids) - len(shown)
+    if extra > 0:
+        return ", ".join(shown) + f" and {extra} more"
+    if len(shown) > 1:
+        return ", ".join(shown[:-1]) + " and " + shown[-1]
+    return shown[0] if shown else ""
+
+
+def require_unique_node_ids(df: pd.DataFrame, action: str) -> None:
+    """Raise ValueError when any node ID is on more than one row.
+
+    A parent ID that names a duplicated ID could mean either row, so an edit
+    by ID would change or drop the wrong rows.
+    """
+    if df is None or df.empty:
+        return
+    dups = duplicate_node_ids(df["id"].astype(int).tolist())
+    if not dups:
+        return
+    noun = "node ID" if len(dups) == 1 else "node IDs"
+    verb = "appears" if len(dups) == 1 else "appear"
+    raise ValueError(
+        f"Cannot {action}: {noun} {format_id_list(dups)} {verb} on more than one row, "
+        "so a parent ID that names a duplicated ID could mean either row. "
+        "Renumber or remove the duplicated rows first."
+    )
+
+
+def missing_parent_nodes(ids: Iterable[int], parents: Iterable[int]) -> list[int]:
+    """Sorted IDs of nodes whose parent ID (not -1) names no node in the file."""
+    id_list = [int(v) for v in ids]
+    known = set(id_list)
+    return sorted({node_id for node_id, parent in zip(id_list, (int(v) for v in parents))
+                   if parent >= 0 and parent not in known})
+
+
+def require_known_parents(df: pd.DataFrame, action: str) -> None:
+    """Raise ValueError when a parent ID names a node that is not in the file."""
+    if df is None or df.empty:
+        return
+    missing = missing_parent_nodes(df["id"].astype(int).tolist(), df["parent"].astype(int).tolist())
+    if not missing:
+        return
+    noun = "node" if len(missing) == 1 else "nodes"
+    raise ValueError(
+        f"Cannot {action}: {noun} {format_id_list(missing)} name a parent ID that is not in the file, "
+        "so there is no parent to keep them attached to. "
+        "Reconnect them to their real parent (Geometry Editing) or restore the missing rows first."
+    )
+
+
+def require_no_parent_cycles(df: pd.DataFrame, action: str) -> None:
+    """Raise ValueError when following parent IDs loops instead of reaching a root."""
+    if df is None or df.empty:
+        return
+    cycles = parent_cycles(
+        df["id"].astype(int).tolist(),
+        df["parent"].astype(int).tolist(),
+        include_self_loops=True,
+    )
+    if not cycles:
+        return
+    parts: list[str] = []
+    for cycle in cycles[:5]:
+        if len(cycle) == 1:
+            parts.append(f"node {cycle[0]} is its own parent")
+        else:
+            parts.append(f"nodes {format_id_list(cycle)} form a parent cycle")
+    if len(cycles) > 5:
+        parts.append(f"{len(cycles) - 5} more cycle(s)")
+    raise ValueError(
+        f"Cannot {action}: " + "; ".join(parts) + ". "
+        "Their parent chain never reaches a root, so there is no parent-before-child order. "
+        "Break the cycle first (Geometry Editing: disconnect, then reconnect the node to its real parent)."
+    )
 
 
 def _id_to_row(df: pd.DataFrame) -> dict[int, int]:
@@ -108,9 +328,18 @@ def reindex_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def reindex_dataframe_with_map(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[int, int]]:
-    """Return a reindexed copy and the old->new id mapping."""
+    """Return a reindexed copy and the old->new id mapping.
+
+    Raises ValueError, and changes nothing, when a node ID is on more than
+    one row (the rows would collapse into one), when parent IDs form a
+    cycle (no parent-before-child order exists), or when a parent ID names
+    no node (renumbering would silently make that node a new root).
+    """
     if df is None or df.empty:
         return _df_copy(df if df is not None else pd.DataFrame(columns=SWC_COLS)), {}
+    require_unique_node_ids(df, "reindex")
+    require_no_parent_cycles(df, "reindex")
+    require_known_parents(df, "reindex")
     work = _df_copy(df)
     row_by_id = {
         int(row["id"]): row.to_dict()
@@ -161,7 +390,9 @@ def reindex_dataframe_with_map(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[int
         parent_id = int(row.get("parent", -1))
         row["parent"] = int(id_map.get(parent_id, -1)) if parent_id >= 0 else -1
         rows.append(row)
-    return pd.DataFrame(rows, columns=SWC_COLS), id_map
+    out = pd.DataFrame(rows, columns=list(work.columns))
+    out.attrs = dict(work.attrs)
+    return out, id_map
 
 
 def subtree_node_ids(df: pd.DataFrame, root_id: int) -> list[int]:
@@ -188,12 +419,15 @@ def upstream_node_ids(df: pd.DataFrame, node_id: int, hops: int) -> list[int]:
     parent_by_id = _parent_by_id(df)
     node_id = int(node_id)
     out = [node_id]
+    seen = {node_id}
     current = node_id
     for _ in range(max(0, int(hops))):
         parent_id = int(parent_by_id.get(current, -1))
-        if parent_id < 0:
+        # A parent cycle would revisit nodes; stop where it closes.
+        if parent_id < 0 or parent_id in seen:
             break
         out.append(parent_id)
+        seen.add(parent_id)
         current = parent_id
     return out
 
@@ -219,14 +453,18 @@ def downstream_node_ids(df: pd.DataFrame, node_id: int, hops: int) -> list[int]:
 
 
 def branch_node_ids(df: pd.DataFrame, node_id: int) -> list[int]:
+    # The seen set stops each walk where a parent cycle closes; without it
+    # a cycle of single-child nodes would loop forever.
     parent_by_id = _parent_by_id(df)
     children_by_id = _children_by_id(df)
     current = int(node_id)
     chain_up = [current]
+    seen = {current}
     while True:
         parent_id = int(parent_by_id.get(current, -1))
-        if parent_id < 0:
+        if parent_id < 0 or parent_id in seen:
             break
+        seen.add(parent_id)
         if len(children_by_id.get(parent_id, [])) != 1:
             chain_up.append(parent_id)
             break
@@ -241,6 +479,9 @@ def branch_node_ids(df: pd.DataFrame, node_id: int) -> list[int]:
         if len(children) != 1:
             break
         child_id = int(children[0])
+        if child_id in seen:
+            break
+        seen.add(child_id)
         chain_down.append(child_id)
         current = child_id
     return chain_up + chain_down
@@ -251,10 +492,12 @@ def upstream_bifurcation_segment_ids(df: pd.DataFrame, node_id: int) -> list[int
     children_by_id = _children_by_id(df)
     current = int(node_id)
     out = [current]
+    seen = {current}
     while True:
         parent_id = int(parent_by_id.get(current, -1))
-        if parent_id < 0:
+        if parent_id < 0 or parent_id in seen:
             break
+        seen.add(parent_id)
         out.append(parent_id)
         if len(children_by_id.get(parent_id, [])) != 1:
             break
@@ -267,11 +510,15 @@ def downstream_bifurcation_segment_ids(df: pd.DataFrame, node_id: int) -> list[i
     children_by_id = _children_by_id(df)
     current = int(node_id)
     out = [current]
+    seen = {current}
     while True:
         children = children_by_id.get(current, [])
         if len(children) != 1:
             break
         current = int(children[0])
+        if current in seen:
+            break
+        seen.add(current)
         out.append(current)
     return out
 
@@ -326,6 +573,7 @@ def make_selection(
 
 
 def move_node_absolute(df: pd.DataFrame, node_id: int, x: float, y: float, z: float) -> pd.DataFrame:
+    require_unique_node_ids(df, f"move node {int(node_id)}")
     out = _df_copy(df)
     mask = out["id"].astype(int) == int(node_id)
     if not bool(mask.any()):
@@ -335,6 +583,7 @@ def move_node_absolute(df: pd.DataFrame, node_id: int, x: float, y: float, z: fl
 
 
 def move_subtree_absolute(df: pd.DataFrame, root_id: int, x: float, y: float, z: float) -> pd.DataFrame:
+    require_unique_node_ids(df, f"move the subtree at node {int(root_id)}")
     out = _df_copy(df)
     root_mask = out["id"].astype(int) == int(root_id)
     if not bool(root_mask.any()):
@@ -359,6 +608,7 @@ def move_selection_by_anchor_absolute(
     y: float,
     z: float,
 ) -> pd.DataFrame:
+    require_unique_node_ids(df, "move the selection")
     out = _df_copy(df)
     wanted = [int(v) for v in list(node_ids or [])]
     if not wanted:
@@ -384,6 +634,7 @@ def reconnect_branch(
     *,
     return_id_map: bool = False,
 ):
+    require_unique_node_ids(df, f"reconnect node {int(target_id)} to node {int(source_id)}")
     out = _df_copy(df)
     start_id = int(source_id)
     end_id = int(target_id)
@@ -408,6 +659,7 @@ def disconnect_branch(
     *,
     return_id_map: bool = False,
 ):
+    require_unique_node_ids(df, f"disconnect the path from node {int(start_id)} to node {int(end_id)}")
     out = _df_copy(df)
     start_id = int(start_id)
     end_id = int(end_id)
@@ -446,6 +698,7 @@ def delete_node(
     reconnect_children: bool,
     return_id_map: bool = False,
 ):
+    require_unique_node_ids(df, f"delete node {int(node_id)}")
     out = _df_copy(df)
     node_id = int(node_id)
     parent_by_id = _parent_by_id(out)
@@ -460,16 +713,17 @@ def delete_node(
     if reconnect_children:
         mask_children = out["id"].astype(int).isin(children)
         out.loc[mask_children, "parent"] = parent_id
-    out = out.loc[out["id"].astype(int) != node_id, SWC_COLS].copy()
+    out = out.loc[out["id"].astype(int) != node_id].copy()
     return (out, {}) if return_id_map else out
 
 
 def delete_subtree(df: pd.DataFrame, root_id: int, *, return_id_map: bool = False):
+    require_unique_node_ids(df, f"delete the subtree at node {int(root_id)}")
     out = _df_copy(df)
     node_ids = set(subtree_node_ids(out, int(root_id)))
     if not node_ids:
         raise ValueError(f"Subtree root {int(root_id)} not found.")
-    out = out.loc[~out["id"].astype(int).isin(node_ids), SWC_COLS].copy()
+    out = out.loc[~out["id"].astype(int).isin(node_ids)].copy()
     return (out, {}) if return_id_map else out
 
 
@@ -483,6 +737,7 @@ def insert_node_before_child(
     radius: float | None = None,
     type_id: int | None = None,
 ) -> pd.DataFrame:
+    require_unique_node_ids(df, f"insert a node before node {int(child_id)}")
     out = _df_copy(df)
     child_id = int(child_id)
     mask = out["id"].astype(int) == child_id
@@ -503,7 +758,7 @@ def insert_node_before_child(
         "parent": parent_id,
     }
     out.loc[mask, "parent"] = new_id
-    out = pd.concat([out, pd.DataFrame([new_row], columns=SWC_COLS)], ignore_index=True)
+    out = _append_row(out, new_row)
     return out
 
 
@@ -519,6 +774,7 @@ def insert_node_between(
     type_id: int | None = None,
     return_id_map: bool = False,
 ):
+    require_unique_node_ids(df, f"insert a node between nodes {int(start_id)} and {int(end_id)}")
     out = _df_copy(df)
     start_id = int(start_id)
     end_id = int(end_id)
@@ -552,7 +808,7 @@ def insert_node_between(
     }
     if end_mask is not None:
         out.loc[end_mask, "parent"] = new_id
-    out = pd.concat([out, pd.DataFrame([new_row], columns=SWC_COLS)], ignore_index=True)
+    out = _append_row(out, new_row)
     return (out, {}) if return_id_map else out
 
 

@@ -31,8 +31,8 @@ def subtree_node_ids(df: pd.DataFrame, root_id: int) -> list[int]:
     return _subtree_node_ids(df, root_id)
 
 
-def make_selection(df: pd.DataFrame, item_id: str, kind: str, anchor_id: int, node_ids: list[int]) -> GeometrySelection:
-    return _make_selection(df, item_id, kind, anchor_id, node_ids)
+def make_selection(df: pd.DataFrame, *, kind: str, anchor_id: int, hops: int | None = None) -> GeometrySelection:
+    return _make_selection(df, kind=kind, anchor_id=anchor_id, hops=hops)
 
 
 def reindex_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -53,13 +53,19 @@ def move_subtree_absolute(df: pd.DataFrame, root_id: int, x: float, y: float, z:
 
 def move_selection_by_anchor_absolute(
     df: pd.DataFrame,
-    selection: GeometrySelection | dict,
+    selection: GeometrySelection | dict | list[int],
     anchor_id: int,
     x: float,
     y: float,
     z: float,
 ) -> pd.DataFrame:
-    return _move_selection_by_anchor_absolute(df, selection, anchor_id, x, y, z)
+    if isinstance(selection, GeometrySelection):
+        node_ids = list(selection.node_ids)
+    elif isinstance(selection, dict):
+        node_ids = list(selection.get("node_ids", []) or [])
+    else:
+        node_ids = list(selection or [])
+    return _move_selection_by_anchor_absolute(df, node_ids, anchor_id, x, y, z)
 
 
 def reconnect_branch(df: pd.DataFrame, source_id: int, target_id: int) -> pd.DataFrame:

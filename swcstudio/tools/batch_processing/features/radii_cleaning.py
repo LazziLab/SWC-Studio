@@ -29,7 +29,11 @@ from swcstudio.core.reporting import (
     timestamp_slug,
     write_text_report,
 )
-from swcstudio.core.swc_io import parse_swc_text_preserve_tokens, write_swc_to_bytes_preserve_tokens
+from swcstudio.core.swc_io import (
+    is_swc_data_file,
+    parse_swc_text_preserve_tokens,
+    write_swc_to_bytes_preserve_tokens,
+)
 from swcstudio.plugins.registry import register_builtin_method, resolve_method
 
 TOOL = "batch_processing"
@@ -42,29 +46,24 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "rules": {
         "small_radius_zero_only": True,
         "sanity_bounds": {
-            "global": {
-                "lower_percentile": 1.0,
-                "upper_percentile": 99.5,
-                "lower_abs": 0.05,
-                "upper_abs": 30.0,
-            },
+            "default": {"min_radius": 0.05, "max_radius": 10.0},
             "per_type": {
-                "2": {"enabled": True, "lower_percentile": 1.0, "upper_percentile": 99.5, "lower_abs": 0.05, "upper_abs": 30.0},
-                "3": {"enabled": True, "lower_percentile": 1.0, "upper_percentile": 99.5, "lower_abs": 0.05, "upper_abs": 30.0},
-                "4": {"enabled": True, "lower_percentile": 1.0, "upper_percentile": 99.5, "lower_abs": 0.05, "upper_abs": 30.0},
+                "2": {"enabled": True, "min_radius": 0.05, "max_radius": 5.0},
+                "3": {"enabled": True, "min_radius": 0.05, "max_radius": 8.0},
+                "4": {"enabled": True, "min_radius": 0.05, "max_radius": 10.0},
             },
         },
         "local_outlier": {
             "enabled": True,
             "window_nodes": 5,
-            "max_percent_deviation": 0.5,
+            "max_ratio": 3.0,
         },
         "taper": {
-            "enabled": True,
+            "enabled": False,
             "slack": 0.05,
         },
         "axon_floor": {
-            "enabled": True,
+            "enabled": False,
             "min_radius": 0.12,
         },
         "savgol": {
@@ -104,7 +103,7 @@ def get_config() -> dict[str, Any]:
 
 
 def _list_swc_files(folder: Path) -> list[Path]:
-    return sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() == ".swc")
+    return sorted(p for p in folder.iterdir() if is_swc_data_file(p))
 
 
 def _normalize_method_output(method_out: Any, input_df: pd.DataFrame) -> tuple[pd.DataFrame, int, list[dict[str, Any]]]:

@@ -16,13 +16,18 @@ swcstudio-gui
 
 ## Step 1: Open a file
 
-Open an SWC file from the `File` menu.
+Open an SWC file from the `File` menu. You can select several files at
+once; each opens in its own tab. `Ctrl+Tab` and `Ctrl+Shift+Tab`
+(`Window -> Next File` / `Previous File`) move between them.
 
 After loading:
 
 - the file appears in the central workspace
 - the left-side `Issues` and `SWC File` panels are populated for the active document
 - validation is triggered automatically for a normal editable document when no prior validation report exists
+- a legend in the corner of the 3D view shows the colour of each node
+  type in the file (for example, apical dendrites are pink, axons blue);
+  `View -> Show Node-Type Legend` hides it
 
 ## Step 2: Review the issue list
 
@@ -61,15 +66,15 @@ Common repair paths:
 
 - `Index Clean`
 - `Manual Label Editing`
-- `Auto Label Editing` — runs the auto-typing engine. The bundled
-  model files work out of the box, so just click **Run**. To use
-  custom-trained models, use the **Browse…** button next to the
-  *Model dir* field. The green/red status indicator next to the field
-  tells you whether the engine can run with the current selection. Use
-  the cell-type selector when you already know whether the cell is
-  pyramidal or interneuron; leave it unknown to run Stage 1. The flag
-  strictness slider controls how conservatively the bad-label flagger
-  marks a cell.
+- `Auto Label Editing` runs the SWC auto-labeler on the current
+  canvas. The bundled model files work out of the box, so just click
+  **Run**. To use custom-trained models, use the **Browse...** button
+  next to the *Model folder* field. The `ready` / `unavailable`
+  indicator next to the field tells you whether the models are found.
+  Leave **Cell class** on `Auto (Stage 1 decides)`, or choose
+  `3-class (axon, basal, apical)` or `2-class (axon, dendrite)` when you
+  already know the cell. With **Quality flag** on, the result shows the
+  predicted per-cell F1 and whether the cell is flagged for review.
 - `Manual Radii Editing`
 - `Auto Radii Editing`
 - `Geometry Editing`
@@ -109,6 +114,12 @@ The GUI keeps:
 
 - the source SWC updated with the current state
 - an encrypted history archive next to the SWC
+
+If a batch run or another program changes a file while it is open, the
+GUI reloads its tab, or asks before an edit or a save would write over
+those changes; a tab that keeps its own version is marked
+`[changed on disk]`. See
+[Files changed on disk](../GUI_WORKFLOW.md#files-changed-on-disk).
 
 Open the History Browser to review operation summaries and expandable
 node-level old/new values. Use Commit History only when you need the

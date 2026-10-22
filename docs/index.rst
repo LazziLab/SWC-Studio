@@ -7,7 +7,6 @@ SWC-Studio Documentation
 
    About <about/index>
    User Guide <documentation/index>
-   GPU Setup <GPU_INSTALL>
    Tutorials <tutorials/index>
    Reference <documentation/reference>
    Provenance Spec <PROVENANCE_SPEC>

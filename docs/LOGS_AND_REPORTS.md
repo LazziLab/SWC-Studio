@@ -67,7 +67,10 @@ This applies to commands such as:
 
 Mutating batch commands such as auto-typing, radii-clean, simplification,
 and index-clean record each processed source SWC in place and do not
-create a shared batch output folder. Text reports
+create a shared batch output folder. Unless the quality flag is off
+(`--no-flag`), `auto-typing` also writes its flag review into the
+folder: `<input_folder>_flag_review_<timestamp>.json` and a `.csv`
+copy, read by the GUI's Flag Review window. Text reports
 are still used for validation/report-only commands and explicit exports.
 `split`, `history checkout`, and `history checkpoint` intentionally
 materialize separate SWC files.
@@ -84,7 +87,8 @@ The History Browser opens on the Operation History tab, where each operation
 can be expanded to show node-level old/new values. Exact version IDs and
 SHA details stay in the Commit History tab for technical review.
 Operation parameters show readable run settings such as thresholds,
-seeds, strictness, and algorithm options; internal hashes, paths, and
+seeds, the cell class and flag settings of an auto-label run, the
+labeler version, and algorithm options; internal hashes, paths, and
 result-summary fields are hidden from this normal view.
 SWC/SWC+ comment headers from the original file are preserved.
 

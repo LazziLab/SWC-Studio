@@ -5,66 +5,48 @@
   "rules": {
     "small_radius_zero_only": true,
     "sanity_bounds": {
-      "global": {
-        "lower_percentile": 1.0,
-        "upper_percentile": 99.5,
-        "lower_abs": 0.05,
-        "upper_abs": 30.0
+      "default": {
+        "min_radius": 0.05,
+        "max_radius": 10.0
       },
       "per_type": {
         "undefined": {
           "type_id": 0,
           "enabled": true,
-          "lower_percentile": 1.0,
-          "upper_percentile": 99.5,
-          "lower_abs": 0.05,
-          "upper_abs": 30.0
-        },
-        "soma": {
-          "type_id": 1,
-          "enabled": true,
-          "lower_percentile": 1.0,
-          "upper_percentile": 99.5,
-          "lower_abs": 0.05,
-          "upper_abs": 30.0
+          "min_radius": 0.05,
+          "max_radius": 10.0
         },
         "axon": {
           "type_id": 2,
           "enabled": true,
-          "lower_percentile": 1.0,
-          "upper_percentile": 99.5,
-          "lower_abs": 0.05,
-          "upper_abs": 30.0
+          "min_radius": 0.05,
+          "max_radius": 5.0
         },
         "basal dendrite": {
           "type_id": 3,
           "enabled": true,
-          "lower_percentile": 1.0,
-          "upper_percentile": 99.5,
-          "lower_abs": 0.05,
-          "upper_abs": 30.0
+          "min_radius": 0.05,
+          "max_radius": 8.0
         },
         "apical dendrite": {
           "type_id": 4,
           "enabled": true,
-          "lower_percentile": 1.0,
-          "upper_percentile": 99.5,
-          "lower_abs": 0.05,
-          "upper_abs": 30.0
+          "min_radius": 0.05,
+          "max_radius": 10.0
         }
       }
     },
     "local_outlier": {
       "enabled": true,
       "window_nodes": 5,
-      "max_percent_deviation": 0.5
+      "max_ratio": 3.0
     },
     "taper": {
-      "enabled": true,
+      "enabled": false,
       "slack": 0.05
     },
     "axon_floor": {
-      "enabled": true,
+      "enabled": false,
       "min_radius": 0.12
     },
     "savgol": {

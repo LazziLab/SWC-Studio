@@ -10,15 +10,14 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
-    QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
-    QSlider,
     QSizePolicy,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -31,15 +30,27 @@ from swcstudio.core.auto_typing import (
     save_config as save_auto_typing_config,
 )
 from swcstudio.core.config import feature_config_path
+from swcstudio.core.swc_io import is_swc_data_file
 from swcstudio.tools.batch_processing.features.batch_validation import validate_folder as run_batch_validation
 from swcstudio.tools.batch_processing.features.index_clean import run_folder as run_batch_index_clean
 from swcstudio.tools.batch_processing.features.simplification import run_folder as run_batch_simplification
 from swcstudio.tools.batch_processing.features.swc_splitter import split_folder
 from .auto_typing_workers import _AutoLabelBatchWorker
+from .validation_auto_label_panel import add_cell_class_items, select_cell_class
 from .report_popup import ReportPopupDialog
 from .radii_cleaning_panel import RadiiCleaningPanel
 
 _CFG_PATH = feature_config_path("batch_processing", "auto_typing")
+
+
+def _not_labeled_line(result: object) -> str:
+    # Structural-check rejections are part of the failures, not extra to them.
+    failed = int(getattr(result, "files_failed", 0) or 0)
+    qc = int(getattr(result, "files_qc_failed", 0) or 0)
+    line = f"Not labeled: {failed}"
+    if failed:
+        line += f" ({qc} failed the structural checks, {failed - qc} errors)"
+    return line
 
 
 class _AutoTypingConfigDialog(QDialog):
@@ -117,6 +128,12 @@ class BatchTabWidget(QWidget):
     log_message = Signal(str)
     batch_validation_ready = Signal(dict)
     precheck_requested = Signal()
+    # Path of a batch's flag review (``*_flag_review_*.json``) to open.
+    flag_review_requested = Signal(str)
+    # A batch tool finished (or stopped) after rewriting SWC files in this
+    # folder in place. Open documents of those files are now stale: the main
+    # window reloads them, so nobody edits (and writes back) the old version.
+    source_files_changed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -128,6 +145,7 @@ class BatchTabWidget(QWidget):
         self._split_input_dir: str = ""
         self._batch_input_dir: str = ""
         self._batch_model_dir: str = ""
+        self._last_flag_review_path: str = ""
         self._validation_input_dir: str = ""
         self._simplify_input_dir: str = ""
         self._index_clean_input_dir: str = ""
@@ -208,11 +226,11 @@ class BatchTabWidget(QWidget):
         root.setAlignment(Qt.AlignTop)
 
         desc = QLabel(
-            "Auto-label every SWC file in a folder with the QC-label-flag "
-            "pipeline: input QC, cell-type detection or override, subtree "
-            "labeling, pyramidal apical/basal GNN rescue, topology cleanup, "
-            "and compact bad-label flag scoring. Each source SWC is updated "
-            "and recorded independently in its own history."
+            "Auto-label every SWC file in a folder with the SWC auto-labeler, then rank "
+            "the cells for review: the quality flag predicts how well each cell was "
+            "labeled, and the riskiest share of each cell class is flagged. Each source "
+            "SWC is updated and recorded in its own history; the ranking opens in the "
+            "Flag Review window."
         )
         desc.setWordWrap(True)
         desc.setStyleSheet("font-size: 12px; color: #555;")
@@ -238,12 +256,13 @@ class BatchTabWidget(QWidget):
         # ---- model dir picker (optional override)
         self._batch_model_row = QHBoxLayout()
         self._batch_model_row.setSpacing(6)
-        model_lbl = QLabel("Model dir (optional):")
+        model_lbl = QLabel("Model folder (optional):")
         model_lbl.setStyleSheet("font-size: 12px; color: #333;")
         self._batch_model_row.addWidget(model_lbl)
         self._batch_edit_model_dir = QLineEdit()
-        self._batch_edit_model_dir.setPlaceholderText("Leave blank for default models")
-        self._batch_edit_model_dir.setToolTip("Leave blank to use bundled / user-data models.")
+        self._batch_edit_model_dir.setPlaceholderText("Leave blank for the shipped models")
+        self._batch_edit_model_dir.setToolTip("A folder written by `swcstudio train auto-typing`.\n"
+                                              "Leave blank to use the shipped or updated models.")
         self._batch_edit_model_dir.setFixedWidth(260)
         self._batch_edit_model_dir.editingFinished.connect(self._on_batch_model_dir_edited)
         self._batch_model_row.addWidget(self._batch_edit_model_dir)
@@ -259,55 +278,52 @@ class BatchTabWidget(QWidget):
 
         type_row = QHBoxLayout()
         type_row.setSpacing(6)
-        cell_lbl = QLabel("Cell type:")
+        cell_lbl = QLabel("Cell class:")
         cell_lbl.setStyleSheet("font-size: 12px; color: #333;")
         type_row.addWidget(cell_lbl)
         self._batch_cell_type_combo = QComboBox()
-        self._batch_cell_type_combo.addItem("Unknown", "unknown")
-        self._batch_cell_type_combo.addItem("Pyramidal", "pyramidal")
-        self._batch_cell_type_combo.addItem("Interneuron", "interneuron")
-        self._batch_cell_type_combo.setMaximumWidth(128)
+        add_cell_class_items(self._batch_cell_type_combo)
+        try:
+            select_cell_class(self._batch_cell_type_combo, get_auto_typing_config().get("cell_type"))
+        except Exception:  # noqa: BLE001
+            pass
         type_row.addWidget(self._batch_cell_type_combo)
-        self._batch_flag_enabled = QCheckBox("Flag")
+        self._batch_flag_enabled = QCheckBox("Quality flag")
         self._batch_flag_enabled.setChecked(True)
         type_row.addWidget(self._batch_flag_enabled)
         type_row.addStretch()
         root.addLayout(type_row)
 
-        strict_row = QHBoxLayout()
-        strict_row.setSpacing(4)
-        strict_lbl = QLabel("Strictness:")
-        strict_lbl.setStyleSheet("font-size: 12px; color: #333;")
-        strict_row.addWidget(strict_lbl)
-        loose_lbl = QLabel("Loose")
-        loose_lbl.setStyleSheet("font-size: 11px; color: #666;")
-        strict_row.addWidget(loose_lbl)
-        self._batch_flag_slider = QSlider(Qt.Horizontal)
-        self._batch_flag_slider.setRange(0, 100)
-        self._batch_flag_slider.setValue(50)
-        self._batch_flag_slider.setFixedWidth(88)
-        strict_row.addWidget(self._batch_flag_slider)
-        strict_side_lbl = QLabel("Strict")
-        strict_side_lbl.setStyleSheet("font-size: 11px; color: #666;")
-        strict_row.addWidget(strict_side_lbl)
-        self._batch_flag_strictness_spin = QDoubleSpinBox()
-        self._batch_flag_strictness_spin.setRange(0.0, 1.0)
-        self._batch_flag_strictness_spin.setSingleStep(0.01)
-        self._batch_flag_strictness_spin.setDecimals(2)
-        self._batch_flag_strictness_spin.setValue(0.50)
-        self._batch_flag_strictness_spin.setFixedWidth(60)
-        self._batch_flag_strictness_spin.setToolTip(
-            "Flag strictness from 0.00 loose to 1.00 strict."
-        )
-        strict_row.addWidget(self._batch_flag_strictness_spin)
-        self._batch_flag_slider.valueChanged.connect(
-            lambda value: self._batch_flag_strictness_spin.setValue(float(value) / 100.0)
-        )
-        self._batch_flag_strictness_spin.valueChanged.connect(
-            lambda value: self._batch_flag_slider.setValue(int(round(float(value) * 100.0)))
-        )
-        strict_row.addStretch()
-        root.addLayout(strict_row)
+        share_row = QHBoxLayout()
+        share_row.setSpacing(6)
+        share_lbl = QLabel("Flag the riskiest")
+        share_lbl.setStyleSheet("font-size: 12px; color: #333;")
+        share_row.addWidget(share_lbl)
+        self._batch_flag_budget = QSpinBox()
+        self._batch_flag_budget.setRange(1, 50)
+        self._batch_flag_budget.setSuffix(" %")
+        try:
+            budget = float(get_auto_typing_config().get("flag_budget", 0.10))
+        except Exception:  # noqa: BLE001
+            budget = 0.10
+        self._batch_flag_budget.setValue(int(round(min(max(budget, 0.01), 0.5) * 100)))
+        self._batch_flag_budget.setFixedWidth(72)
+        self._batch_flag_budget.setToolTip(
+            "Share of each cell class flagged for review, ranked by predicted per-cell F1.\n"
+            "10% is the share the labeler's flag was evaluated at. A class with too few\n"
+            "cells for that share uses the flag's fixed cut-off instead.")
+        share_row.addWidget(self._batch_flag_budget)
+        share_tail = QLabel("of each cell class")
+        share_tail.setStyleSheet("font-size: 12px; color: #333;")
+        share_row.addWidget(share_tail)
+        self._batch_btn_flag_review = self._compact_button(QPushButton("Open Flag Review"), 136)
+        self._batch_btn_flag_review.setEnabled(False)
+        self._batch_btn_flag_review.setToolTip("Open the ranked list of the last batch.")
+        self._batch_btn_flag_review.clicked.connect(
+            lambda: self.flag_review_requested.emit(self._last_flag_review_path))
+        share_row.addWidget(self._batch_btn_flag_review)
+        share_row.addStretch()
+        root.addLayout(share_row)
 
         # Per-file progress for batch runs. Hidden until a worker starts.
         self._batch_progress = QProgressBar()
@@ -337,9 +353,7 @@ class BatchTabWidget(QWidget):
             self._set_batch_input_dir(path)
 
     def _on_browse_batch_model_dir(self) -> None:
-        path = QFileDialog.getExistingDirectory(
-            self, "Select directory containing auto-typing model files"
-        )
+        path = QFileDialog.getExistingDirectory(self, "Select a labeler model folder")
         if path:
             self._batch_model_dir = path
             self._sync_batch_model_dir_label()
@@ -399,7 +413,7 @@ class BatchTabWidget(QWidget):
         self._batch_edit_model_dir.blockSignals(True)
         self._batch_edit_model_dir.setText(self._batch_model_dir)
         self._batch_edit_model_dir.setToolTip(
-            self._batch_model_dir or "Leave blank to use bundled / user-data models."
+            self._batch_model_dir or "Leave blank to use the shipped or updated models."
         )
         self._batch_edit_model_dir.blockSignals(False)
 
@@ -409,7 +423,7 @@ class BatchTabWidget(QWidget):
         if ok:
             self._batch_backend_status_lbl.setText("ready")
             self._batch_backend_status_lbl.setStyleSheet("font-size: 11px; color: #2a7;")
-            self._batch_backend_status_lbl.setToolTip("All required model files are loaded.")
+            self._batch_backend_status_lbl.setToolTip("The labeler's model folder was found.")
         else:
             self._batch_backend_status_lbl.setText("unavailable")
             self._batch_backend_status_lbl.setStyleSheet("font-size: 11px; color: #c33;")
@@ -418,7 +432,15 @@ class BatchTabWidget(QWidget):
     def _build_radii_page(self) -> QWidget:
         page = RadiiCleaningPanel(self, allow_loaded_swc_run=False)
         page.log_message.connect(self.log_message.emit)
+        page.log_message.connect(self._on_radii_page_message)
         return page
+
+    def _on_radii_page_message(self, text: str) -> None:
+        # The radii page reports a finished run only through its status text;
+        # a folder run rewrites every source file in place (a failed one may
+        # have rewritten some).
+        if str(text or "").startswith(("Radii cleaning completed", "Radii cleaning failed")):
+            self.source_files_changed.emit(str(getattr(self._radii_page, "_selected_folder", "") or ""))
 
     def _build_validation_page(self) -> QWidget:
         page = QWidget()
@@ -631,7 +653,7 @@ class BatchTabWidget(QWidget):
 
         swc_files = [
             f for f in os.listdir(folder_path)
-            if f.lower().endswith(".swc") and os.path.isfile(os.path.join(folder_path, f))
+            if is_swc_data_file(os.path.join(folder_path, f))
         ]
         if not swc_files:
             self._set_status(
@@ -647,20 +669,18 @@ class BatchTabWidget(QWidget):
             basal=True,
             rad=False,
             zip_output=False,
-            cell_type=self._batch_cell_type_combo.currentData() or "unknown",
+            cell_type=self._batch_cell_type_combo.currentData() or "auto",
             flag_enabled=self._batch_flag_enabled.isChecked(),
-            flag_strictness=float(self._batch_flag_slider.value()) / 100.0,
-            flag_feature_mode="compact",
+            flag_budget=float(self._batch_flag_budget.value()) / 100.0,
         )
 
         md = (self._batch_model_dir or "").strip() or None
         config_overrides: dict = {}
         if md:
             config_overrides["model_dir"] = md
-        config_overrides["cell_type"] = self._batch_cell_type_combo.currentData() or "unknown"
+        config_overrides["cell_type"] = self._batch_cell_type_combo.currentData() or "auto"
         config_overrides["flag_enabled"] = self._batch_flag_enabled.isChecked()
-        config_overrides["flag_strictness"] = float(self._batch_flag_slider.value()) / 100.0
-        config_overrides["flag_feature_mode"] = "compact"
+        config_overrides["flag_budget"] = float(self._batch_flag_budget.value()) / 100.0
 
         # Hand off to a worker thread so the UI stays responsive while
         # the engine processes potentially many files.
@@ -694,8 +714,8 @@ class BatchTabWidget(QWidget):
         self._batch_btn_browse_model.setEnabled(not running)
         self._batch_cell_type_combo.setEnabled(not running)
         self._batch_flag_enabled.setEnabled(not running)
-        self._batch_flag_slider.setEnabled(not running)
-        self._batch_flag_strictness_spin.setEnabled(not running)
+        self._batch_flag_budget.setEnabled(not running)
+        self._batch_btn_flag_review.setEnabled(not running and bool(self._last_flag_review_path))
 
         self._batch_progress.setVisible(running)
         self._batch_progress_label.setVisible(running)
@@ -729,14 +749,20 @@ class BatchTabWidget(QWidget):
             f"Folder: {getattr(result, 'folder', '')}",
             "Each processed source file was updated and recorded in its own history.",
             f"SWC files detected: {getattr(result, 'files_total', 0)}",
-            f"Processed: {getattr(result, 'files_processed', 0)}",
-            f"QC rejected: {getattr(result, 'files_qc_failed', 0)}",
-            f"Failed: {getattr(result, 'files_failed', 0)}",
+            f"Labeled: {getattr(result, 'files_processed', 0)}",
+            f"Labeled with warnings (a compartment is missing): {getattr(result, 'files_with_warnings', 0)}",
+            _not_labeled_line(result),
             f"Total nodes processed: {getattr(result, 'total_nodes', 0)}",
             f"Type changes: {getattr(result, 'total_type_changes', 0)}",
             f"Radius changes: {getattr(result, 'total_radius_changes', 0)}",
-            f"Flagged files: {getattr(result, 'files_flagged', 0)}",
         ]
+        review_path = getattr(result, "flag_review_path", None)
+        budget = getattr(result, "flag_budget", None)
+        if review_path:
+            lines.append(
+                f"Flagged for review: {getattr(result, 'files_flagged', 0)} "
+                f"(the riskiest {float(budget or 0.10):.0%} of each cell class)")
+            lines.append(f"Flag review: {review_path}")
         zip_path = getattr(result, "zip_path", None)
         if zip_path:
             lines.append(f"ZIP output: {zip_path}")
@@ -746,19 +772,26 @@ class BatchTabWidget(QWidget):
             lines.append("Per-file summary:")
             lines.extend(per_file[:25])
             if len(per_file) > 25:
-                lines.append(f"... ({len(per_file) - 25} more)")
+                lines.append(f"... ({len(per_file) - 25} more in the report file)")
         failures = list(getattr(result, "failures", []) or [])
         if failures:
             lines.append("")
-            lines.append("Errors:")
-            lines.extend(failures[:10])
+            lines.append("Not labeled:")
+            lines.extend(failures)
         log_path = getattr(result, "log_path", None)
         if log_path:
             lines.extend(["", f"Report file: {log_path}"])
 
         self._set_status("\n".join(lines), self._batch_status_box)
+        self._last_flag_review_path = str(review_path or "")
         self._set_batch_running(False)
-        self._show_report_popup("Auto-Typing Batch Report", log_path)
+        # Before the review opens: a cell opened from it must be the
+        # relabeled file, not a tab holding its old labels.
+        self.source_files_changed.emit(str(getattr(result, "folder", "") or self._batch_input_dir))
+        if review_path:
+            self.flag_review_requested.emit(str(review_path))
+        else:
+            self._show_report_popup("Auto-Typing Batch Report", log_path)
 
     @Slot(int, str)
     def _on_batch_failed(self, run_id: int, message: str) -> None:
@@ -769,6 +802,8 @@ class BatchTabWidget(QWidget):
             self._batch_status_box,
         )
         self._set_batch_running(False)
+        # Files labeled before the failure were already rewritten.
+        self.source_files_changed.emit(self._batch_input_dir)
 
     @Slot()
     def _cleanup_batch_worker_refs(self) -> None:
@@ -836,7 +871,9 @@ class BatchTabWidget(QWidget):
             out = run_batch_simplification(folder_path)
         except Exception as e:  # noqa: BLE001
             self._set_status(f"Batch simplification failed:\n{e}", self._batch_simplify_status)
+            self.source_files_changed.emit(folder_path)  # files done before the error changed
             return
+        self.source_files_changed.emit(folder_path)
 
         per_file = list(out.get("per_file", []))
         failures = list(out.get("failures", []))
@@ -885,7 +922,9 @@ class BatchTabWidget(QWidget):
             out = run_batch_index_clean(folder_path)
         except Exception as e:  # noqa: BLE001
             self._set_status(f"Batch index clean failed:\n{e}", self._batch_index_clean_status)
+            self.source_files_changed.emit(folder_path)  # files done before the error changed
             return
+        self.source_files_changed.emit(folder_path)
 
         per_file = list(out.get("per_file", []))
         failures = list(out.get("failures", []))

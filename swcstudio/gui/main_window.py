@@ -1,5 +1,6 @@
 """Main window layout for the issue-driven SWC Studio workspace."""
 
+import hashlib
 import os
 import sys
 import tempfile
@@ -11,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 from PySide6.QtCore import QEvent, QRect, QSize, QThread, Qt, Signal, Slot
-from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QFontMetrics
+from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QFontMetrics, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -39,6 +40,7 @@ from PySide6.QtWidgets import (
 
 from .auto_typing_guide import AutoTypingGuideWidget
 from .auto_typing_workers import _AutoLabelFileWorker, _TypeSuspicionWorker
+from .flag_review_window import FlagReviewPanel
 from .batch_tab import BatchTabWidget
 from .constants import SWC_COLS, label_for_type
 from .context_inspector import ContextInspectorWidget
@@ -105,46 +107,150 @@ from swcstudio.tools.validation.features.auto_typing import BatchOptions, run_fi
 # whenever the typed value still matches the original. That makes the
 # diff faithful: only fields the user actually changed get a fresh repr.
 
-_TOKEN_COLS = ("id_str", "type_str", "x_str", "y_str", "z_str",
-               "radius_str", "parent_str")
+# The token columns swc_io's parser creates (and its writer reads). There is
+# no type token: the writer always formats the type from the integer value.
+_TOKEN_COLS = ("x_str", "y_str", "z_str", "radius_str", "id_str", "parent_str")
+
+
+def _decode_swc_bytes(raw: bytes) -> str:
+    """SWC file bytes as text. A UTF-8 byte-order mark is dropped: the parser
+    would otherwise read it as part of the first line (losing a first comment
+    line, or turning the first node's id into -1)."""
+    return raw.decode("utf-8-sig", errors="ignore")
 
 
 def _enrich_df_with_original_tokens(new_df: pd.DataFrame,
-                                    input_bytes: bytes | None) -> pd.DataFrame:
+                                    input_bytes: bytes | None,
+                                    *,
+                                    id_map: dict | None = None) -> pd.DataFrame:
     """Return ``new_df`` augmented with original *_str token columns.
 
-    For each row whose id matches a row in the parsed input bytes, the
-    original token strings are attached as the corresponding *_str columns.
-    Rows whose id didn't exist before, or rows lacking an id, simply don't
-    receive token columns — the writer will format them with default repr,
-    which is the correct behavior for genuinely new content.
+    Each row gets the original token strings of the same node in the parsed
+    input bytes. Nodes are matched by id; when the operation renumbered the
+    nodes, ``id_map`` (old id -> new id) maps each row back to its old id so
+    the tokens follow the node rather than the number. Rows with no original
+    node get no tokens, and the writer formats them with the default repr,
+    which is the correct behavior for genuinely new content. Tokens a row
+    already carries are kept.
     """
     if input_bytes is None or new_df is None or new_df.empty:
         return new_df
-    if all(c in new_df.columns for c in _TOKEN_COLS):
-        return new_df  # GUI already supplied tokens; nothing to do
     if "id" not in new_df.columns:
         return new_df
     try:
-        from swcstudio.core.swc_io import parse_swc_text_preserve_tokens  # noqa: PLC0415
-        prev = parse_swc_text_preserve_tokens(
-            input_bytes.decode("utf-8", errors="ignore")
-        )
+        prev = parse_swc_text_preserve_tokens(_decode_swc_bytes(input_bytes))
     except Exception:
         return new_df
     if prev is None or prev.empty:
         return new_df
-    # Build a lookup table id → original token columns.
-    have = [c for c in _TOKEN_COLS if c in prev.columns]
-    if not have:
-        return new_df
-    lookup = prev.set_index(prev["id"].astype(int))[have]
+    # The file's comment lines are what is on disk now: keep them.
     out = new_df.copy()
     out.attrs.update(getattr(prev, "attrs", {}) or {})
-    ids = out["id"].astype(int)
+    if all(c in new_df.columns for c in _TOKEN_COLS):
+        return out  # the rows already carry their tokens (they follow the nodes)
+    have = [c for c in _TOKEN_COLS if c in prev.columns]
+    if not have:
+        return out
+    # Lookup table old id -> original tokens. Ids that appear more than once
+    # are ambiguous, so their rows get no tokens.
+    lookup = prev.set_index(prev["id"].astype(int))[have]
+    lookup = lookup[~lookup.index.duplicated(keep=False)]
+    new_ids = [int(v) for v in out["id"].tolist()]
+    if id_map:
+        old_by_new = {int(new): int(old) for old, new in dict(id_map).items()}
+        source_ids = [old_by_new.get(nid) for nid in new_ids]
+    else:
+        source_ids = new_ids
+    known = set(lookup.index)
     for col in have:
-        out[col] = ids.map(lookup[col])
+        values = lookup[col].to_dict()
+        found = pd.Series(
+            [values[sid] if sid in known else np.nan for sid in source_ids],
+            index=out.index,
+            dtype=object,
+        )
+        if col in out.columns:
+            out[col] = out[col].where(out[col].notna(), found)
+        else:
+            out[col] = found
     return out
+
+
+def _same_float(a, b) -> bool:
+    a, b = float(a), float(b)
+    return a == b or (a != a and b != b)  # NaN equals NaN here
+
+
+def _field_rewrite_bytes(new_df: pd.DataFrame, input_bytes: bytes | None) -> bytes | None:
+    """``input_bytes`` with only the changed type/radius fields rewritten, or None.
+
+    When an edit changed nothing but node types and radii (labeling, radius
+    edits), the file is written the way the CLI's auto-label writes it: every
+    other byte stays as it was, including a byte-order mark, line endings,
+    comment lines where they stand, text after a ``#`` on a node line and
+    columns after the seventh. Returns None when the edit changed anything
+    else (ids, order, parents, coordinates, nodes added or removed) or the
+    file cannot be matched node for node; the caller then writes the file
+    from the dataframe.
+    """
+    if input_bytes is None or new_df is None or new_df.empty:
+        return None
+    try:
+        from swcstudio.core import swc_io  # noqa: PLC0415
+
+        rewrite = swc_io.rewrite_swc_fields
+        rows_of = swc_io.swc_data_rows_from_text
+        text = swc_io.decode_swc_bytes(input_bytes)
+        encode = swc_io.encode_swc_text
+    except Exception:  # noqa: BLE001 - older swc_io without these helpers
+        return None
+    try:
+        _headers, rows = rows_of(text)
+        ids = [int(v) for v in new_df["id"].tolist()]
+        if len(rows) != len(ids) or [int(r["id"]) for r in rows] != ids or len(set(ids)) != len(ids):
+            return None
+        types: dict[int, int] = {}
+        radii: dict[int, float] = {}
+        columns = zip(ids, new_df["type"].tolist(), new_df["x"].tolist(), new_df["y"].tolist(),
+                      new_df["z"].tolist(), new_df["radius"].tolist(), new_df["parent"].tolist())
+        for row, (nid, ntype, x, y, z, radius, parent) in zip(rows, columns):
+            if int(parent) != int(row["parent"]) or not all(
+                _same_float(new, row[key]) for new, key in ((x, "x"), (y, "y"), (z, "z"))
+            ):
+                return None
+            if int(ntype) != int(row["type"]):
+                types[nid] = int(ntype)
+            if not _same_float(radius, row["radius"]):
+                radii[nid] = float(radius)
+        return encode(rewrite(text, types, radii))
+    except Exception:  # noqa: BLE001 - fall back to writing the dataframe
+        return None
+
+
+def _file_fingerprint(path: str | Path) -> tuple[int, int, str] | None:
+    """(size, mtime_ns, SHA-256 of the contents) of ``path``; None if unreadable."""
+    try:
+        raw = Path(path).read_bytes()
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (len(raw), int(st.st_mtime_ns), hashlib.sha256(raw).hexdigest())
+
+
+def _result_field(result: object, key: str):
+    """``key`` of an auto-label result, whether it is a dict or an object."""
+    if isinstance(result, dict):
+        return result.get(key)
+    return getattr(result, key, None)
+
+
+class _DiskChangedError(RuntimeError):
+    """The file changed on disk between the conflict check and the write."""
+
+
+# Returned by _record_tracked_commit when the edit must not be applied: the
+# file changed on disk and the user did not choose to overwrite it.
+_COMMIT_CANCELLED = object()
 
 
 def _copy_swc_metadata(dst: pd.DataFrame, src: pd.DataFrame | None) -> pd.DataFrame:
@@ -156,6 +262,36 @@ def _copy_swc_metadata(dst: pd.DataFrame, src: pd.DataFrame | None) -> pd.DataFr
             if key not in dst.attrs or not dst.attrs.get(key):
                 dst.attrs[key] = value
     return dst
+
+
+# Opening more new files than this at once asks first: every tab builds its own
+# 3D views, projections and dendrogram, so many tabs use a lot of memory.
+_MANY_FILES_CONFIRM = 10
+
+
+def _path_key(path: str | Path) -> str:
+    """Comparable form of a file path: resolved, absolute, case-folded on Windows."""
+    try:
+        resolved = str(Path(path).resolve())
+    except Exception:
+        resolved = os.path.abspath(str(path))
+    return os.path.normcase(resolved)
+
+
+def _same_path(a: str | Path, b: str | Path) -> bool:
+    """True when ``a`` and ``b`` name the same file.
+
+    Paths are compared in their resolved, case-folded (Windows) form first.
+    When both exist, ``os.path.samefile`` decides: it also catches spellings
+    that differ only in case on case-insensitive file systems (the macOS
+    default), hard links, and other aliases the string form cannot see.
+    """
+    if _path_key(a) == _path_key(b):
+        return True
+    try:
+        return os.path.exists(a) and os.path.exists(b) and os.path.samefile(a, b)
+    except OSError:
+        return False
 
 
 def _suggest_closed_output_path(base: str | Path, *, timestamp: str | None = None) -> Path:
@@ -200,6 +336,16 @@ class _DocumentState:
     auto_label_preview_df: pd.DataFrame | None = None
     auto_label_preview_base_df: pd.DataFrame | None = None
     last_simplification_result: dict | None = None
+    # (size, mtime_ns, sha256) of the file as SWC-Studio last read or wrote
+    # it. A different file on disk means someone else changed it (a batch
+    # run, another program): never overwrite that silently.
+    disk_fingerprint: tuple[int, int, str] | None = None
+    # The file changed on disk but this tab kept its own version.
+    disk_stale: bool = False
+    # Bumped whenever the document is reloaded from disk, so results of work
+    # started on the previous contents (auto-label) are not applied to it.
+    load_generation: int = 0
+    validation_error: str = ""
 
 
 class _CanvasTabs(QTabWidget):
@@ -375,6 +521,7 @@ class SWCMainWindow(QMainWindow):
         self._batch_has_results: bool = False
         self._closing_app: bool = False
         self._runtime_log_lines: list[str] = []
+        self._type_legend_visible: bool = True
 
         # Auto-label single-file worker state. Run on a QThread so the
         # GUI stays responsive during the (~1-second) inference.
@@ -383,6 +530,7 @@ class SWCMainWindow(QMainWindow):
         self._validation_auto_label_thread: QThread | None = None
         self._validation_auto_label_tmp_path: Path | None = None
         self._validation_auto_label_source_doc: _DocumentState | None = None
+        self._validation_auto_label_source_generation: int = 0
         self._validation_auto_label_options: object | None = None
 
         # Type-suspicion worker — runs the auto-typing engine in the
@@ -485,6 +633,7 @@ class SWCMainWindow(QMainWindow):
         self._validation_tab = ValidationTabWidget(as_panel=False)
         self._validation_tab.precheck_requested.connect(self._on_precheck_requested)
         self._validation_tab.report_ready.connect(self._on_validation_report_ready)
+        self._validation_tab.validation_failed.connect(self._on_validation_failed)
         self._validation_tab.result_activated.connect(self._on_validation_result_activated)
         self._validation_index_clean = ValidationIndexCleanWidget(self)
         self._validation_index_clean.index_clean_requested.connect(self._on_validation_index_clean_requested)
@@ -586,7 +735,32 @@ class SWCMainWindow(QMainWindow):
         self.addDockWidget(Qt.TopDockWidgetArea, self._auto_guide_dock)
         self._auto_guide_dock.hide()
 
+        # Flag Review: a batch's labeled cells ranked for curator review.
+        self._flag_review_panel = FlagReviewPanel(self)
+        self._flag_review_dock = QDockWidget("Flag Review", self)
+        self._flag_review_dock.setObjectName("FlagReviewDock")
+        self._flag_review_dock.setFeatures(
+            QDockWidget.DockWidgetMovable
+            | QDockWidget.DockWidgetFloatable
+            | QDockWidget.DockWidgetClosable
+        )
+        self._flag_review_dock.setAllowedAreas(
+            Qt.TopDockWidgetArea | Qt.BottomDockWidgetArea | Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea
+        )
+        self._flag_review_dock.setWidget(self._flag_review_panel)
+        self._make_panel_freely_resizable(self._flag_review_dock)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self._flag_review_dock)
+        self._flag_review_dock.hide()
+        self._flag_review_panel.open_files_requested.connect(self._on_flag_review_open_requested)
+        self._flag_review_panel.log_message.connect(lambda msg: self._append_log(msg, "FLAG"))
+        self._batch_tab.flag_review_requested.connect(self._open_flag_review)
+
         self._batch_tab.log_message.connect(lambda msg: self._append_log(msg, "BATCH"))
+        # Batch tools rewrite source files in place: no open tab may keep
+        # (and later write back) the version from before the batch.
+        self._batch_tab.source_files_changed.connect(
+            lambda _folder: self._check_open_documents_against_disk("the batch run")
+        )
 
         # ---------------- Bottom edit log ----------------
         self._bottom_log_title = QLabel("Edit Log")
@@ -766,6 +940,11 @@ class SWCMainWindow(QMainWindow):
         export_action.triggered.connect(self._on_export)
         file_menu.addAction(export_action)
 
+        self._reload_action = QAction("Reload from Disk", self)
+        self._reload_action.setToolTip("Show the current file as it is on disk now.")
+        self._reload_action.triggered.connect(self._on_reload_from_disk_requested)
+        file_menu.addAction(self._reload_action)
+
         self._recent_menu = file_menu.addMenu("Recent Files")
         self._recent_menu.addAction("(empty)").setEnabled(False)
 
@@ -815,6 +994,13 @@ class SWCMainWindow(QMainWindow):
         cam_side_action.triggered.connect(lambda: self._set_camera("side"))
         view_menu.addAction(cam_side_action)
 
+        view_menu.addSeparator()
+        self._type_legend_action = QAction("Show Node-Type Legend", self)
+        self._type_legend_action.setCheckable(True)
+        self._type_legend_action.setChecked(self._type_legend_visible)
+        self._type_legend_action.toggled.connect(self._set_type_legend_visible)
+        view_menu.addAction(self._type_legend_action)
+
         # Window
         window_menu = menu.addMenu("Window")
         reset_layout_action = QAction("Reset Layout", self)
@@ -845,6 +1031,25 @@ class SWCMainWindow(QMainWindow):
         )
         window_menu.addAction(show_auto_guide_action)
 
+        show_flag_review_action = QAction("Show/Hide Flag Review", self)
+        show_flag_review_action.triggered.connect(
+            lambda: self._flag_review_dock.setVisible(not self._flag_review_dock.isVisible())
+        )
+        window_menu.addAction(show_flag_review_action)
+
+        window_menu.addSeparator()
+        # Standard "next/previous child window" keys: Ctrl+Tab / Ctrl+Shift+Tab
+        # on Windows and Linux, the platform equivalent on macOS.
+        self._next_document_action = QAction("Next File", self)
+        self._next_document_action.setShortcuts(QKeySequence.NextChild)
+        self._next_document_action.triggered.connect(lambda: self._cycle_document(1))
+        window_menu.addAction(self._next_document_action)
+
+        self._previous_document_action = QAction("Previous File", self)
+        self._previous_document_action.setShortcuts(QKeySequence.PreviousChild)
+        self._previous_document_action.triggered.connect(lambda: self._cycle_document(-1))
+        window_menu.addAction(self._previous_document_action)
+
         # History (provenance) - see PROVENANCE_SPEC.md for the full surface.
         history_menu = menu.addMenu("History")
         open_history_action = QAction("Open History Browser…", self)
@@ -863,9 +1068,6 @@ class SWCMainWindow(QMainWindow):
         short_action = QAction("Shortcuts", self)
         short_action.triggered.connect(self._show_shortcuts)
         help_menu.addAction(short_action)
-        gpu_action = QAction("GPU Readiness...", self)
-        gpu_action.triggered.connect(self._show_gpu_readiness_dialog)
-        help_menu.addAction(gpu_action)
         help_menu.addSeparator()
         update_action = QAction("Check for Updates...", self)
         update_action.triggered.connect(self._check_for_updates)
@@ -1285,6 +1487,8 @@ class SWCMainWindow(QMainWindow):
         self._geometry_panel.set_current_node(None)
         self._batch_tab.set_loaded_swc(doc.df, doc.filename, doc.file_path)
         should_auto_run_validation = bool(auto_run_validation and not doc.is_preview and doc.validation_report is None)
+        if should_auto_run_validation:
+            doc.validation_error = ""
         self._validation_tab.load_swc(
             doc.df,
             doc.filename,
@@ -1533,6 +1737,7 @@ class SWCMainWindow(QMainWindow):
         kind,
         params: dict,
         message: str = "",
+        id_map: dict | None = None,
     ) -> object | None:
         """Record a provenance commit for a single GUI mutation.
 
@@ -1546,6 +1751,14 @@ class SWCMainWindow(QMainWindow):
         Failures are logged and swallowed — provenance must never
         block a GUI edit from being applied to the in-memory display.
 
+        Returns ``_COMMIT_CANCELLED`` when the file changed on disk since
+        this document last read or wrote it and the user did not choose to
+        overwrite it. The caller must then not apply the edit: the tab is
+        either reloaded from disk or left as it was.
+
+        ``id_map`` (old id -> new id) is for operations that renumber nodes,
+        so the original number text follows each node.
+
         Token-fidelity note: GUI dataframes don't carry the original
         per-cell ``*_str`` columns that the SWC writer uses to
         round-trip exact number formatting. Without that, the writer
@@ -1558,12 +1771,11 @@ class SWCMainWindow(QMainWindow):
         """
         if doc.is_preview or not getattr(doc, "file_path", ""):
             return None
+        if not self._confirm_document_write(doc, action="Applying this edit"):
+            return _COMMIT_CANCELLED
+        expected_sha = doc.disk_fingerprint[2] if doc.disk_fingerprint else None
         try:
             from swcstudio.core.provenance import OpKind, tracked_op  # noqa: PLC0415
-            from swcstudio.core.swc_io import (  # noqa: PLC0415
-                parse_swc_text_preserve_tokens,
-                write_swc_to_bytes_preserve_tokens,
-            )
 
             kind_value = kind.value if isinstance(kind, OpKind) else str(kind)
             with tracked_op(
@@ -1572,16 +1784,41 @@ class SWCMainWindow(QMainWindow):
                 params=dict(params or {}),
                 message=message or f"GUI {kind_value}",
             ) as op:
-                # Re-attach original *_str token columns from the
-                # previous state for byte-faithful round-trip.
-                enriched = _enrich_df_with_original_tokens(
-                    new_df, op.input_bytes
-                )
-                op.set_output(write_swc_to_bytes_preserve_tokens(enriched))
+                # Checked again under the history lock: a batch run may have
+                # written the file since the check above.
+                if (
+                    expected_sha is not None
+                    and op.input_bytes is not None
+                    and hashlib.sha256(op.input_bytes).hexdigest() != expected_sha
+                ):
+                    raise _DiskChangedError(doc.file_path)
+                # Type/radius-only edits rewrite just those fields of the
+                # file, keeping everything else byte for byte.
+                payload = None if id_map else _field_rewrite_bytes(new_df, op.input_bytes)
+                if payload is None:
+                    # Re-attach original *_str token columns from the
+                    # previous state for byte-faithful round-trip.
+                    enriched = _enrich_df_with_original_tokens(
+                        new_df, op.input_bytes, id_map=id_map
+                    )
+                    payload = write_swc_to_bytes_preserve_tokens(enriched)
+                op.set_output(payload)
             saved_df = new_df.copy()
             _copy_swc_metadata(saved_df, doc.df)
             doc.original_df = saved_df
+            self._remember_disk_state(doc, written=payload)
             return op.result
+        except _DiskChangedError:
+            self._mark_document_stale(doc)
+            QMessageBox.warning(
+                self,
+                "File Changed on Disk",
+                f"{doc.filename} changed on disk while this edit was being saved.\n\n"
+                "Nothing was written and the edit was not applied. "
+                "Use File -> Reload from Disk to see the file's current contents.",
+            )
+            self._append_log(f"{doc.filename} changed on disk; edit not applied.", "WARN")
+            return _COMMIT_CANCELLED
         except Exception as e:  # noqa: BLE001
             # Never block a GUI edit because the history layer failed.
             # Surface the failure in the log so it's visible without
@@ -1717,6 +1954,264 @@ class SWCMainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             return True
 
+    # ------------------------------------------------- Changes made on disk
+    # The GUI writes each edit straight to the source SWC. Anything else that
+    # writes the same file while it is open (a GUI or CLI batch run, another
+    # program) makes the open tab stale; writing the tab back would silently
+    # undo those changes. Every document remembers a fingerprint of the file
+    # as SWC-Studio last read or wrote it, and nothing writes over a file
+    # whose contents differ from it without asking.
+
+    @staticmethod
+    def _read_swc_document_file(path: str | Path) -> tuple[pd.DataFrame, tuple[int, int, str]]:
+        """Parse ``path`` for a document; also return the file's fingerprint."""
+        raw = Path(path).read_bytes()
+        fingerprint = (len(raw), int(os.stat(path).st_mtime_ns), hashlib.sha256(raw).hexdigest())
+        df = parse_swc_text_preserve_tokens(_decode_swc_bytes(raw))
+        for col in ("id", "type", "parent"):
+            df[col] = df[col].astype(int)
+        return df, fingerprint
+
+    def _remember_disk_state(self, doc: _DocumentState, *, written: bytes | None = None) -> None:
+        """Record the file as it is now as the version this tab matches.
+
+        ``written``: the SWC body this tab just committed. If the file no
+        longer holds it (another writer got in right after), the old
+        fingerprint is kept, so the next write asks first.
+        """
+        if doc is None or not str(doc.file_path or "").strip():
+            return
+        try:
+            raw = Path(doc.file_path).read_bytes()
+            fingerprint = (len(raw), int(os.stat(doc.file_path).st_mtime_ns), hashlib.sha256(raw).hexdigest())
+        except OSError:
+            return
+        if written is not None:
+            try:
+                from swcstudio.core.provenance.header import strip_prov_lines  # noqa: PLC0415
+
+                if strip_prov_lines(raw) != strip_prov_lines(written):
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+        doc.disk_fingerprint = fingerprint
+        if doc.disk_stale:
+            doc.disk_stale = False
+            self._refresh_document_title(doc)
+
+    def _disk_changed(self, doc: _DocumentState) -> tuple[int, int, str] | None:
+        """The file's current fingerprint if its contents differ from the
+        version this tab last read or wrote; None if unchanged (or missing,
+        or never read: then there is nothing on disk to lose)."""
+        if doc is None or doc.is_preview or not str(doc.file_path or "").strip():
+            return None
+        if doc.disk_fingerprint is None:
+            return None
+        current = _file_fingerprint(doc.file_path)
+        if current is None or current[2] == doc.disk_fingerprint[2]:
+            return None
+        return current
+
+    def _refresh_document_title(self, doc: _DocumentState) -> None:
+        title = doc.filename + (" [changed on disk]" if doc.disk_stale else "")
+        tip = str(doc.file_path or doc.filename)
+        if doc.disk_stale:
+            tip += (
+                "\nThis file was changed on disk after it was opened here. "
+                "File -> Reload from Disk shows the file's current contents."
+            )
+        idx = self._canvas_tabs.indexOf(doc.editor)
+        if idx >= 0:
+            self._canvas_tabs.setTabText(idx, title)
+            self._canvas_tabs.setTabToolTip(idx, tip)
+        float_win = self._detached_windows.get(doc.editor)
+        if float_win is not None:
+            float_win.setWindowTitle(title)
+
+    def _mark_document_stale(self, doc: _DocumentState) -> None:
+        if doc is None or doc.disk_stale:
+            return
+        doc.disk_stale = True
+        self._refresh_document_title(doc)
+        self._append_log(
+            f"{doc.filename} was changed on disk; this tab keeps its own version "
+            "(File -> Reload from Disk shows the file's).",
+            "WARN",
+        )
+
+    def _ask_disk_conflict(self, doc: _DocumentState, *, action: str | None) -> str:
+        """Ask what to do about a file that changed on disk.
+
+        With ``action`` (a write is about to happen) the answer is "reload",
+        "overwrite" or "cancel"; without (the file is being opened again
+        while this tab has its own changes) it is "reload" or "keep".
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("File Changed on Disk")
+        box.setText(f"{doc.filename} was changed on disk after SWC-Studio loaded it.")
+        reload_btn = box.addButton("Reload from Disk", QMessageBox.DestructiveRole)
+        if action:
+            box.setInformativeText(
+                "Another program or a batch run (for example Auto Label Editing on its "
+                f"folder) has written the file since. {action} would replace those "
+                "changes with this tab's version.\n\n"
+                "Reload from Disk: discard this tab's version and show the file as it is now.\n"
+                "Overwrite File: keep this tab's version and replace the file's contents."
+            )
+            overwrite_btn = box.addButton("Overwrite File", QMessageBox.AcceptRole)
+            cancel_btn = box.addButton(QMessageBox.Cancel)
+            box.setDefaultButton(cancel_btn)
+            box.setEscapeButton(cancel_btn)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is reload_btn:
+                return "reload"
+            if clicked is overwrite_btn:
+                return "overwrite"
+            return "cancel"
+        box.setInformativeText(
+            "This tab also has changes that are not in the file.\n\n"
+            "Reload from Disk: discard this tab's changes and show the file as it is now.\n"
+            "Keep My Version: keep this tab as it is. Saving or editing it later asks "
+            "before replacing the file's contents."
+        )
+        keep_btn = box.addButton("Keep My Version", QMessageBox.RejectRole)
+        box.setDefaultButton(keep_btn)
+        box.setEscapeButton(keep_btn)
+        box.exec()
+        return "reload" if box.clickedButton() is reload_btn else "keep"
+
+    def _confirm_document_write(self, doc: _DocumentState, *, action: str) -> bool:
+        """True if this tab may write its version over ``doc.file_path``.
+
+        Asks first when the file changed on disk since this tab last read or
+        wrote it; a "Reload from Disk" answer reloads the tab (and returns False).
+        """
+        current = self._disk_changed(doc)
+        if current is None:
+            return True
+        choice = self._ask_disk_conflict(doc, action=action)
+        if choice == "overwrite":
+            doc.disk_fingerprint = current
+            self._append_log(f"Overwriting {doc.filename}, which had changed on disk.", "WARN")
+            return True
+        if choice == "reload":
+            self._reload_document_from_disk(doc, reason="at your request")
+            return False
+        self._mark_document_stale(doc)
+        self._append_log(f"Nothing written: {doc.filename} changed on disk.", "WARN")
+        return False
+
+    def _sync_document_with_disk(self, doc: _DocumentState, *, ask: bool, reason: str) -> None:
+        """Bring an open tab up to date with its file if the file changed on disk.
+
+        A tab without changes of its own is reloaded. A tab with its own
+        changes is never reloaded silently: with ``ask`` the user chooses,
+        otherwise the tab is marked "[changed on disk]".
+        """
+        if self._disk_changed(doc) is None:
+            return
+        if not self._document_has_unsaved_edits(doc):
+            self._reload_document_from_disk(doc, reason=reason)
+            return
+        if ask and self._ask_disk_conflict(doc, action=None) == "reload":
+            self._reload_document_from_disk(doc, reason="at your request")
+            return
+        self._mark_document_stale(doc)
+
+    def _reload_document_from_disk(
+        self,
+        doc: _DocumentState,
+        *,
+        reason: str = "",
+        refresh_ui: bool = True,
+    ) -> bool:
+        """Replace a tab's contents with its file as it is on disk now.
+
+        The tab's undo steps, issues and auto-label state belong to the old
+        contents and are reset.
+        """
+        if doc is None or doc.is_preview or not str(doc.file_path or "").strip():
+            return False
+        try:
+            df, fingerprint = self._read_swc_document_file(doc.file_path)
+        except Exception as e:  # noqa: BLE001
+            self._append_log(f"Could not reload {doc.filename}: {e}", "WARN")
+            return False
+        if df.empty:
+            self._append_log(f"Could not reload {doc.filename}: the file has no data rows.", "WARN")
+            return False
+        preview_editor = self._simplify_preview_by_source.get(doc.editor)
+        if preview_editor is not None:
+            self._remove_simplification_preview(preview_editor, switch_to_source=False)
+        preview_editor = self._auto_label_preview_by_source.get(doc.editor)
+        if preview_editor is not None:
+            self._remove_validation_auto_label_preview(preview_editor, switch_to_source=False)
+        self._clear_recovery_copy(doc)
+        doc.df = df.copy()
+        doc.original_df = df.copy()
+        doc.disk_fingerprint = fingerprint
+        doc.disk_stale = False
+        doc.load_generation += 1
+        doc.validation_report = None
+        doc.validation_error = ""
+        doc.issues = []
+        self._start_morphology_session(doc)
+        doc.editor.load_swc(df.loc[:, SWC_COLS].copy(), doc.filename)
+        doc.editor.set_mode(self._editor_mode_for_feature())
+        self._refresh_document_title(doc)
+        self._refresh_edit_history_state(doc)
+        if refresh_ui and doc is self._active_document():
+            self._sync_from_active_document(auto_run_validation=True)
+        self._append_log(
+            f"Reloaded {doc.filename} from disk" + (f" ({reason})." if reason else "."),
+            "INFO",
+        )
+        return True
+
+    def _check_open_documents_against_disk(self, source: str) -> None:
+        """After something else wrote files (``source``: a batch run), reload
+        every open tab whose file changed; tabs with their own changes are
+        kept, marked, and listed in one warning."""
+        kept: list[str] = []
+        for doc in list(self._documents.values()):
+            if doc.is_preview or self._disk_changed(doc) is None:
+                continue
+            if self._document_has_unsaved_edits(doc):
+                self._mark_document_stale(doc)
+                kept.append(doc.filename)
+            else:
+                self._reload_document_from_disk(doc, reason=f"changed by {source}")
+        if kept:
+            QMessageBox.warning(
+                self,
+                "Files Changed on Disk",
+                f"These open files were changed on disk by {source}, and their tabs also have "
+                "changes that are not in the files:\n\n"
+                + "\n".join(f"  {name}" for name in kept)
+                + "\n\nThe tabs keep their own versions, marked [changed on disk]. "
+                "Editing or saving one asks before replacing the file's contents; "
+                "File -> Reload from Disk shows the file's current contents.",
+            )
+
+    def _on_reload_from_disk_requested(self) -> None:
+        doc = self._active_source_document()
+        if doc is None or doc.is_preview or not str(doc.file_path or "").strip():
+            self._append_log("No SWC file to reload.", "WARN")
+            return
+        if self._document_has_unsaved_edits(doc):
+            answer = QMessageBox.question(
+                self,
+                "Reload from Disk",
+                f"Discard this tab's changes to {doc.filename} and reload the file from disk?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+        self._reload_document_from_disk(doc, reason="at your request")
+
     def _recovery_directory(self) -> Path:
         path = Path.home() / ".swc_studio" / "recovery"
         path.mkdir(parents=True, exist_ok=True)
@@ -1833,14 +2328,16 @@ class SWCMainWindow(QMainWindow):
                 target = output_path or str(doc.file_path or "")
                 if not target:
                     raise ValueError("Missing original SWC path.")
-                self._write_swc_file(target, doc.df)
+                if not self._write_document_to(doc, target, action="Saving"):
+                    return False
                 self._append_log(f"Saved original SWC: {target}", "INFO")
                 self._after_document_write(doc, target, action_name="Save")
                 self._finalize_morphology_session(doc, show_popup=False)
             elif kind == "write_close_copy":
                 if not output_path:
                     raise ValueError("Missing output path for closing copy.")
-                self._write_swc_file(output_path, doc.df)
+                if not self._write_document_to(doc, output_path, action="Saving"):
+                    return False
                 self._append_log(f"Changed SWC copy saved to: {output_path}", "INFO")
                 self._finalize_morphology_session(doc, show_popup=False, source_override=output_path)
             elif kind == "close":
@@ -2019,7 +2516,7 @@ class SWCMainWindow(QMainWindow):
         _params["original_node_count"] = int(payload.get("original_node_count", 0))
         _params["new_node_count"]      = int(payload.get("new_node_count", 0))
         _params["reduction_percent"]   = float(payload.get("reduction_percent", 0.0))
-        self._record_tracked_commit(
+        if self._record_tracked_commit(
             source_doc, simplified_df, kind=OpKind.SIMPLIFICATION,
             params=_params,
             message=(
@@ -2027,7 +2524,9 @@ class SWCMainWindow(QMainWindow):
                 f"{payload.get('new_node_count', 0)} nodes "
                 f"({payload.get('reduction_percent', 0.0):.2f}% reduction)"
             ),
-        )
+        ) is _COMMIT_CANCELLED:
+            source_doc.last_simplification_result = None
+            return
         self._apply_document_dataframe(
             source_doc,
             simplified_df,
@@ -2139,7 +2638,7 @@ class SWCMainWindow(QMainWindow):
         config_overrides: dict = {}
         if backend_cfg.get("model_dir"):
             config_overrides["model_dir"] = str(backend_cfg["model_dir"])
-        for key in ("cell_type", "flag_enabled", "flag_strictness", "flag_feature_mode"):
+        for key in ("cell_type", "flag_enabled"):
             if key in backend_cfg:
                 config_overrides[key] = backend_cfg[key]
 
@@ -2172,6 +2671,7 @@ class SWCMainWindow(QMainWindow):
         run_id = int(self._validation_auto_label_run_id)
         self._validation_auto_label_tmp_path = tmp_path
         self._validation_auto_label_source_doc = source_doc
+        self._validation_auto_label_source_generation = int(source_doc.load_generation)
         self._validation_auto_label_options = options
 
         self._validation_auto_label_panel.set_running(
@@ -2211,6 +2711,23 @@ class SWCMainWindow(QMainWindow):
         self._validation_auto_label_options = None
 
         if source_doc is None:
+            self._validation_auto_label_panel.set_running(False)
+            return
+        # The labels were computed from the tab's contents when Run was
+        # clicked. If the tab was closed or reloaded from disk since, they do
+        # not belong to what is there now: never write them over it.
+        still_open = self._documents.get(source_doc.editor) is source_doc
+        if not still_open or int(source_doc.load_generation) != int(
+            self._validation_auto_label_source_generation
+        ):
+            self._append_log(
+                f"Auto Label Editing result for {source_doc.filename} discarded: the file was "
+                "closed or reloaded while it ran. Run it again.",
+                "WARN",
+            )
+            self._validation_auto_label_panel.set_status_text(
+                "Auto Label Editing result discarded: the file was closed or reloaded while it ran."
+            )
             self._validation_auto_label_panel.set_running(False)
             return
 
@@ -2261,10 +2778,8 @@ class SWCMainWindow(QMainWindow):
             "apic": bool(getattr(opts, "apic", False)),
             "basal": bool(getattr(opts, "basal", False)),
             "rad": bool(getattr(opts, "rad", False)),
-            "cell_type": str(getattr(opts, "cell_type", "unknown") or "unknown"),
+            "cell_type": str(getattr(opts, "cell_type", "auto") or "auto"),
             "flag_enabled": bool(getattr(opts, "flag_enabled", True)),
-            "flag_strictness": float(getattr(opts, "flag_strictness", 0.5)),
-            "flag_feature_mode": str(getattr(opts, "flag_feature_mode", "compact") or "compact"),
         }
         result_payload = {
             "input_file": str(source_doc.file_path or source_doc.filename),
@@ -2274,7 +2789,11 @@ class SWCMainWindow(QMainWindow):
             "out_type_counts": dict(getattr(result_obj, "out_type_counts", {}) or {}),
             "cell_type": getattr(result_obj, "cell_type", None),
             "cell_type_source": getattr(result_obj, "cell_type_source", "stage1"),
+            "stage1_cell_type": getattr(result_obj, "stage1_cell_type", None),
             "stage1_confidence": getattr(result_obj, "stage1_confidence", None),
+            "class_mismatch": bool(getattr(result_obj, "class_mismatch", False)),
+            "notes": list(getattr(result_obj, "notes", []) or []),
+            "labeler_version": getattr(result_obj, "labeler_version", None),
             "qc_result": dict(getattr(result_obj, "qc_result", {}) or {}),
             "flag_result": dict(getattr(result_obj, "flag_result", {}) or {}),
             "change_details": [
@@ -2286,43 +2805,81 @@ class SWCMainWindow(QMainWindow):
             ],
             "options": opts_dict,
             "log_path": "",
+            # Which model folder labeled the file (model_dir, model_source,
+            # model_version, model_sha, model_files); recorded with the op.
+            "model_record": _result_field(result_obj, "model_record"),
         }
         source_doc.last_auto_label_options = dict(opts_dict)
         source_doc.last_auto_label_result = dict(result_payload)
 
         out_counts = dict(result_payload.get("out_type_counts", {}))
+        flag_result = dict(result_payload.get("flag_result", {}) or {})
+        from swcstudio.core.auto_typing import cell_class_name  # noqa: PLC0415
         event_details = [
             f"Input: {source_doc.file_path or source_doc.filename}",
             f"Nodes: {int(result_payload.get('nodes_total', 0))}",
             f"Type changes: {int(result_payload.get('type_changes', 0))}",
-            f"Cell type: {result_payload.get('cell_type') or 'unknown'} ({result_payload.get('cell_type_source') or 'stage1'})",
-            f"Flagged: {bool(dict(result_payload.get('flag_result', {}) or {}).get('flagged', False))}",
+            (f"Cell class: {cell_class_name(result_payload.get('cell_type'))} "
+             f"({'chosen' if result_payload.get('cell_type_source') == 'user' else 'Stage 1'})"),
+            f"Flagged: {bool(flag_result.get('flagged', False))}"
+            + (f" (predicted per-cell F1 {float(flag_result['predicted_f1']):.3f})"
+               if flag_result.get("predicted_f1") is not None else ""),
             (
                 "Out types (1/2/3/4): "
                 f"{out_counts.get(1, 0)}/{out_counts.get(2, 0)}/{out_counts.get(3, 0)}/{out_counts.get(4, 0)}"
             ),
         ]
+        if result_payload.get("class_mismatch"):
+            event_details.append(
+                f"Class mismatch: Stage 1 predicts {cell_class_name(result_payload.get('stage1_cell_type'))}")
+        # e.g. "no axon labeled", or nodes on a branch with no standard type
+        # that the labeler left as they were.
+        label_warnings = [str(w) for w in (_result_field(result_obj, "warnings") or []) if str(w).strip()]
+        event_details.extend(f"Warning: {w}" for w in label_warnings)
+        if label_warnings:
+            self._append_log(f"Auto label {source_doc.filename}: " + "; ".join(label_warnings), "WARN")
         # Provenance: this is an AI op. tracked_op auto-detects
         # OpKind.AUTO_LABEL as AI, captures the full env fingerprint
         # (every installed package + system info), records an
         # AI-run blob with model params + metrics. After this lands,
         # `swcstudio history reproduce <sha>` produces a reproduce.yaml.
         from swcstudio.core.provenance import OpKind  # noqa: PLC0415
-        self._record_tracked_commit(
+        commit_params = {
+            "options":          opts_dict,
+            "labeler_version":  result_payload.get("labeler_version"),
+            "nodes_total":      int(result_payload.get("nodes_total", 0)),
+            "type_changes":     int(result_payload.get("type_changes", 0)),
+            "out_type_counts":  {str(k): int(v) for k, v in out_counts.items()},
+            "cell_type_result": result_payload.get("cell_type"),
+            "cell_type_source": result_payload.get("cell_type_source"),
+            "stage1_cell_type": result_payload.get("stage1_cell_type"),
+            "class_mismatch":   bool(result_payload.get("class_mismatch", False)),
+            "flagged":          bool(flag_result.get("flagged", False)),
+            "predicted_f1":     flag_result.get("predicted_f1"),
+        }
+        # Top level, as the CLI records it, so `history reproduce` finds
+        # model_dir. Nothing extra when the result carries no record.
+        model_record = result_payload.get("model_record") or {}
+        if isinstance(model_record, dict):
+            for key, value in model_record.items():
+                commit_params.setdefault(str(key), value)
+        committed = self._record_tracked_commit(
             source_doc,
             preview_df,
             kind=OpKind.AUTO_LABEL,
-            params={
-                "options":         opts_dict,
-                "nodes_total":     int(result_payload.get("nodes_total", 0)),
-                "type_changes":    int(result_payload.get("type_changes", 0)),
-                "out_type_counts": {str(k): int(v) for k, v in out_counts.items()},
-            },
+            params=commit_params,
             message=(
                 f"GUI auto-label: {int(result_payload.get('type_changes', 0))} "
                 f"type changes / {int(result_payload.get('nodes_total', 0))} nodes"
             ),
         )
+        if committed is _COMMIT_CANCELLED:
+            source_doc.last_auto_label_result = None
+            source_doc.last_auto_label_options = None
+            self._validation_auto_label_panel.set_status_text(
+                "Auto Label Editing result not applied: the file changed on disk."
+            )
+            return
         self._apply_document_dataframe(
             source_doc,
             preview_df.copy(),
@@ -2339,10 +2896,20 @@ class SWCMainWindow(QMainWindow):
         source_doc.pending_type_suspicion_issues = []
         source_doc.auto_label_preview_base_df = None
         source_doc.auto_label_preview_df = None
-        self._validation_auto_label_panel.set_preview_state(False, result_payload)
-        self._rerun_active_validation()
+        if source_doc is self._active_source_document():
+            self._validation_auto_label_panel.set_preview_state(False, result_payload)
+            self._rerun_active_validation()
+        else:
+            # The user switched to another tab while the labeler ran. The
+            # labeled file's issues describe its old labels: drop them so it
+            # is validated again when its tab is shown.
+            source_doc.validation_report = None
+            source_doc.validation_error = ""
+            source_doc.issues = []
+            source_doc.selected_issue_id = ""
+            self._refresh_validation_auto_label_panel_state()
         self._append_log(
-            "Validation Auto Label Editing applied to current canvas: "
+            f"Validation Auto Label Editing applied to {source_doc.filename}: "
             f"nodes={result_payload['nodes_total']}, "
             f"type_changes={result_payload['type_changes']}, "
             f"radius_changes={result_payload['radius_changes']}",
@@ -2363,8 +2930,8 @@ class SWCMainWindow(QMainWindow):
             f"nodes={int(result.get('nodes_total', 0))}, "
             f"type_changes={int(result.get('type_changes', 0))}, "
             f"radius_changes={int(result.get('radius_changes', 0))}, "
-            f"cell_type={result.get('cell_type') or 'unknown'} "
-            f"({result.get('cell_type_source') or 'stage1'}), "
+            f"cell_class={result.get('cell_type') or 'auto'} "
+            f"({'user' if result.get('cell_type_source') == 'user' else 'auto'}), "
             f"flag={bool(dict(result.get('flag_result', {}) or {}).get('flagged', False))}, "
             f"out_types(soma/axon/basal/apic)="
             f"{out_counts.get(1, 0)}/{out_counts.get(2, 0)}/{out_counts.get(3, 0)}/{out_counts.get(4, 0)}"
@@ -2410,7 +2977,7 @@ class SWCMainWindow(QMainWindow):
         # document's .history/. Falls through silently if the document
         # has no file path (preview / untitled doc).
         from swcstudio.core.provenance import OpKind  # noqa: PLC0415
-        self._record_tracked_commit(
+        if self._record_tracked_commit(
             doc,
             new_df,
             kind=OpKind.SET_RADIUS,
@@ -2419,7 +2986,8 @@ class SWCMainWindow(QMainWindow):
                 f"GUI manual radii: node {int(node_id)} "
                 f"{old_radius:.6g} → {target_radius:.6g}"
             ),
-        )
+        ) is _COMMIT_CANCELLED:
+            return
 
         self._apply_document_dataframe(
             doc,
@@ -2477,7 +3045,7 @@ class SWCMainWindow(QMainWindow):
         # record effective_config here.
         from swcstudio.core.provenance import OpKind  # noqa: PLC0415
         _radii_effective = dict(payload.get("config_used") or {})
-        self._record_tracked_commit(
+        if self._record_tracked_commit(
             doc,
             new_df_final,
             kind=OpKind.RADII_CLEAN,
@@ -2490,7 +3058,8 @@ class SWCMainWindow(QMainWindow):
                 f"GUI auto radii: passes={passes_used}, "
                 f"radius_changes={total_changes}"
             ),
-        )
+        ) is _COMMIT_CANCELLED:
+            return
 
         self._apply_document_dataframe(
             doc,
@@ -2525,6 +3094,13 @@ class SWCMainWindow(QMainWindow):
             return
         doc.editor.focus_node(int(swc_id))
         self._geometry_panel.set_current_node(int(swc_id))
+
+    def _report_geometry_refusal(self, exc: Exception) -> None:
+        """A geometry edit was refused (for example duplicate node ids or a
+        parent cycle, which the edit operations reject): nothing was changed.
+        Say why in a dialog, not only in the status bar."""
+        self._append_log(f"Geometry Editing: {exc}", "WARN")
+        QMessageBox.warning(self, "Geometry Editing", str(exc))
 
     def _apply_geometry_dataframe(
         self,
@@ -2562,16 +3138,17 @@ class SWCMainWindow(QMainWindow):
             old_xyz = (float(row["x"]), float(row["y"]), float(row["z"]))
             new_df = move_selection_by_anchor_absolute(doc.df, selected_node_ids, int(anchor_id), float(x), float(y), float(z))
         except Exception as exc:  # noqa: BLE001
-            self._append_log(f"Geometry Editing: {exc}", "WARN")
+            self._report_geometry_refusal(exc)
             return
         from swcstudio.core.provenance import OpKind  # noqa: PLC0415
-        self._record_tracked_commit(
+        if self._record_tracked_commit(
             doc, new_df, kind=OpKind.GEOMETRY_EDIT,
             params={"op": "move-selection", "anchor_id": int(anchor_id),
                     "selected_node_ids": selected_node_ids,
                     "x": float(x), "y": float(y), "z": float(z)},
             message=f"GUI geometry move-selection anchor={anchor_id} ({len(selected_node_ids)} nodes)",
-        )
+        ) is _COMMIT_CANCELLED:
+            return
         self._apply_geometry_dataframe(
             doc,
             new_df,
@@ -2597,14 +3174,15 @@ class SWCMainWindow(QMainWindow):
             old_parent = int(end_row["parent"])
             new_df = reconnect_branch(doc.df, int(source_id), int(target_id))
         except Exception as exc:  # noqa: BLE001
-            self._append_log(f"Geometry Editing: {exc}", "WARN")
+            self._report_geometry_refusal(exc)
             return
         from swcstudio.core.provenance import OpKind  # noqa: PLC0415
-        self._record_tracked_commit(
+        if self._record_tracked_commit(
             doc, new_df, kind=OpKind.GEOMETRY_EDIT,
             params={"op": "connect", "start_id": int(source_id), "end_id": int(target_id)},
             message=f"GUI geometry reconnect end={target_id} → parent={source_id}",
-        )
+        ) is _COMMIT_CANCELLED:
+            return
         self._geometry_panel.clear_all_selections()
         self._geometry_panel.set_current_node(None)
         self._apply_geometry_dataframe(
@@ -2654,14 +3232,15 @@ class SWCMainWindow(QMainWindow):
                     raise ValueError("Encountered a non-parent-child step while disconnecting the selected path.")
             new_df = disconnect_branch(doc.df, int(source_id), int(target_id))
         except Exception as exc:  # noqa: BLE001
-            self._append_log(f"Geometry Editing: {exc}", "WARN")
+            self._report_geometry_refusal(exc)
             return
         from swcstudio.core.provenance import OpKind  # noqa: PLC0415
-        self._record_tracked_commit(
+        if self._record_tracked_commit(
             doc, new_df, kind=OpKind.GEOMETRY_EDIT,
             params={"op": "disconnect", "start_id": int(source_id), "end_id": int(target_id)},
             message=f"GUI geometry disconnect path {source_id} … {target_id}",
-        )
+        ) is _COMMIT_CANCELLED:
+            return
         self._geometry_panel.clear_all_selections()
         self._geometry_panel.set_current_node(None)
         self._apply_geometry_dataframe(
@@ -2695,15 +3274,16 @@ class SWCMainWindow(QMainWindow):
             child_count = int((doc.df["parent"].astype(int) == int(node_id)).sum())
             new_df = geometry_delete_node(doc.df, int(node_id), reconnect_children=bool(reconnect_children))
         except Exception as exc:  # noqa: BLE001
-            self._append_log(f"Geometry Editing: {exc}", "WARN")
+            self._report_geometry_refusal(exc)
             return
         from swcstudio.core.provenance import OpKind  # noqa: PLC0415
-        self._record_tracked_commit(
+        if self._record_tracked_commit(
             doc, new_df, kind=OpKind.GEOMETRY_EDIT,
             params={"op": "delete-node", "node_id": int(node_id),
                     "reconnect_children": bool(reconnect_children)},
             message=f"GUI geometry delete-node id={node_id} reconnect={bool(reconnect_children)}",
-        )
+        ) is _COMMIT_CANCELLED:
+            return
         self._geometry_panel.clear_all_selections()
         self._geometry_panel.set_current_node(None)
         event_title = "Delete Node" if not reconnect_children else "Delete Node + Reconnect Children"
@@ -2734,14 +3314,15 @@ class SWCMainWindow(QMainWindow):
             parent_id = int(parent_row["parent"])
             new_df = geometry_delete_subtree(doc.df, int(root_id))
         except Exception as exc:  # noqa: BLE001
-            self._append_log(f"Geometry Editing: {exc}", "WARN")
+            self._report_geometry_refusal(exc)
             return
         from swcstudio.core.provenance import OpKind  # noqa: PLC0415
-        self._record_tracked_commit(
+        if self._record_tracked_commit(
             doc, new_df, kind=OpKind.GEOMETRY_EDIT,
             params={"op": "delete-subtree", "root_id": int(root_id)},
             message=f"GUI geometry delete-subtree root={root_id}",
-        )
+        ) is _COMMIT_CANCELLED:
+            return
         self._geometry_panel.clear_all_selections()
         self._geometry_panel.set_current_node(None)
         self._apply_geometry_dataframe(
@@ -2770,16 +3351,17 @@ class SWCMainWindow(QMainWindow):
             inserted_node_id = int(doc.df["id"].astype(int).max()) + 1
             new_df = insert_node_between(doc.df, int(start_id), int(end_id), x=float(x), y=float(y), z=float(z))
         except Exception as exc:  # noqa: BLE001
-            self._append_log(f"Geometry Editing: {exc}", "WARN")
+            self._report_geometry_refusal(exc)
             return
         from swcstudio.core.provenance import OpKind  # noqa: PLC0415
-        self._record_tracked_commit(
+        if self._record_tracked_commit(
             doc, new_df, kind=OpKind.GEOMETRY_EDIT,
             params={"op": "insert", "start_id": int(start_id), "end_id": int(end_id),
                     "x": float(x), "y": float(y), "z": float(z),
                     "inserted_node_id": int(inserted_node_id)},
             message=f"GUI geometry insert between {start_id} and {end_id}",
-        )
+        ) is _COMMIT_CANCELLED:
+            return
         self._geometry_panel.clear_all_selections()
         self._geometry_panel.set_current_node(None)
         self._apply_geometry_dataframe(
@@ -2887,13 +3469,14 @@ class SWCMainWindow(QMainWindow):
         self._refresh_top_feature_buttons()
 
     # --------------------------------------------------------- Feature routing
-    def _activate_feature(self, name: str):
+    def _activate_feature(self, name: str, *, force: bool = False):
         key = (name or "").strip().lower()
         current = (self._active_tool or "").strip().lower()
         if key and key == current:
             return
         if (
-            key != "validation"
+            not force
+            and key != "validation"
             and key != current
             and hasattr(self, "_validation_tab")
             and self._validation_tab.is_running()
@@ -3008,86 +3591,115 @@ class SWCMainWindow(QMainWindow):
         user to close and reopen the file.
 
         Idempotent and safe — if no open document matches ``path``
-        the call is a no-op.
+        the call is a no-op. A tab with changes that are not in the file
+        is not reloaded without asking.
         """
-        try:
-            from swcstudio.core.provenance import current_swc_path_for  # noqa: PLC0415
-        except Exception:
-            current_swc_path_for = None  # type: ignore[assignment]
-
-        target = Path(path).resolve()
-        match_doc = None
-        for ed, doc in self._documents.items():
-            if doc.is_preview:
-                continue
-            try:
-                if Path(doc.file_path).resolve() == target:
-                    match_doc = doc
-                    break
-            except Exception:
-                continue
+        match_doc = self._find_open_document(path)
         if match_doc is None:
             return
-
-        # current_swc_path_for is kept as a compatibility helper; in
-        # current builds it resolves to the source SWC itself.
-        src_path = Path(path)
-        if current_swc_path_for is not None:
-            cur = current_swc_path_for(src_path)
-            if cur.exists():
-                src_path = cur
-
-        try:
-            new_text = src_path.read_text(encoding="utf-8", errors="ignore")
-            new_df = parse_swc_text_preserve_tokens(new_text)
-            if new_df.empty:
-                return
-            for col in ("id", "type", "parent"):
-                new_df[col] = new_df[col].astype(int)
-            new_df = new_df.loc[:, SWC_COLS].copy()
-        except Exception as e:
-            self._append_log(f"Reload failed: {e}", "WARN")
-            return
-
-        # Reset in-memory document state to the reloaded df. Push a
-        # history snapshot so the user can still Undo if they didn't
-        # mean to revert; clear the recovery copy so we don't leak a
-        # stale unsaved-changes marker.
-        match_doc.df = new_df
-        match_doc.validation_report = None
-        match_doc.issues = []
-        match_doc.pending_type_suspicion_issues = None
-        match_doc.edit_history.reset()
-        match_doc.editor.load_swc(match_doc.df, match_doc.filename)
-        self._clear_recovery_copy(match_doc)
-        if match_doc is self._active_document():
-            self._sync_from_active_document(auto_run_validation=True)
-        self._append_log(
-            f"Reloaded {match_doc.filename} from {src_path.name}.",
-            "INFO",
-        )
+        self._sync_document_with_disk(match_doc, ask=True, reason="after the history revert")
 
     def _on_open(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open SWC file", "", "SWC Files (*.swc);;All Files (*)"
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Open SWC files", "", "SWC Files (*.swc);;All Files (*)"
         )
-        if path:
-            self._load_swc(path)
+        if paths:
+            self._open_paths(paths)
 
-    def _load_swc(self, path: str):
+    def _open_paths(self, paths: list[str]) -> None:
+        """Open several SWC files, each in its own tab, and show the first.
+
+        Tabs are added without making each one current, so validation runs
+        only for the file that ends up shown (the others validate when their
+        tab is first selected). Files that are already open are not opened
+        again.
+        """
+        paths = [str(p) for p in (paths or []) if str(p or "").strip()]
+        if not paths:
+            return
+        new_keys = {_path_key(p) for p in paths if self._find_open_document(p) is None}
+        if len(new_keys) > _MANY_FILES_CONFIRM:
+            answer = QMessageBox.question(
+                self,
+                "Open Files",
+                f"Open {len(new_keys)} files?\n\n"
+                "Each file opens in its own tab with its own 3D views and dendrogram, "
+                "so many open files use a lot of memory.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                self._append_log(f"Open cancelled ({len(new_keys)} files selected).", "INFO")
+                return
+        first_editor = None
+        for path in paths:
+            editor = self._load_swc(path, activate=len(paths) == 1)
+            if first_editor is None and editor is not None:
+                first_editor = editor
+        if first_editor is not None:
+            self._show_document(first_editor)
+
+    def _find_open_document(self, path: str | Path) -> _DocumentState | None:
+        """The open (non-preview) document for ``path``, if there is one."""
+        docs = [doc for doc in self._documents.values() if not doc.is_preview and doc.file_path]
+        key = _path_key(path)
+        for doc in docs:
+            if _path_key(doc.file_path) == key:
+                return doc
+        # Spellings the string form cannot match (case on macOS, links).
+        for doc in docs:
+            if _same_path(doc.file_path, path):
+                return doc
+        return None
+
+    def _show_document(self, editor: EditorTab) -> None:
+        """Bring an open document forward: select its tab or raise its window."""
+        float_win = self._detached_windows.get(editor)
+        if float_win is not None:
+            float_win.show()
+            float_win.raise_()
+            float_win.activateWindow()
+            return
+        idx = self._canvas_tabs.indexOf(editor)
+        if idx >= 0:
+            self._canvas_tabs.setCurrentIndex(idx)
+
+    def _cycle_document(self, step: int) -> None:
+        """Select the next (step=1) or previous (step=-1) document tab, wrapping around."""
+        count = self._canvas_tabs.count()
+        if count < 2:
+            return
+        current = max(0, self._canvas_tabs.currentIndex())
+        self._canvas_tabs.setCurrentIndex((current + int(step)) % count)
+
+    def _load_swc(self, path: str, *, activate: bool = True) -> EditorTab | None:
+        """Open ``path`` in a new tab and return its editor.
+
+        If the file is already open, its existing tab is used instead (and
+        shown when ``activate``), so no entry point opens a file twice. When
+        that file changed on disk since the tab read it (a batch run
+        relabeled it, say), the tab is reloaded, or, if it has changes of
+        its own, the user chooses: opening a file never shows a stale copy
+        silently. Returns None if the file could not be loaded.
+        """
+        existing = self._find_open_document(path)
+        if existing is not None:
+            self._sync_document_with_disk(existing, ask=True, reason="it changed on disk")
+            if activate:
+                self._show_document(existing.editor)
+            self._append_log(f"{existing.filename} is already open.", "INFO")
+            return existing.editor
         try:
-            df = parse_swc_text_preserve_tokens(Path(path).read_text(encoding="utf-8", errors="ignore"))
+            df, fingerprint = self._read_swc_document_file(path)
             if df.empty:
                 self._append_log(f"Empty file: {path} contains no data rows.", "WARN")
-                return
-
-            for col in ("id", "type", "parent"):
-                df[col] = df[col].astype(int)
+                return None
 
             filename = os.path.basename(path)
             editor = EditorTab()
             self._connect_editor_signals(editor)
             controls = editor.take_dendrogram_controls_panel()
+            editor.set_type_legend_visible(self._type_legend_visible)
             editor.load_swc(df.loc[:, SWC_COLS].copy(), filename)
 
             doc = _DocumentState(
@@ -3097,12 +3709,15 @@ class SWCMainWindow(QMainWindow):
                 filename=filename,
                 file_path=str(path),
                 original_df=df.copy(),
+                disk_fingerprint=fingerprint,
             )
             self._documents[editor] = doc
             self._start_morphology_session(doc)
 
             idx = self._canvas_tabs.addTab(editor, filename)
-            self._canvas_tabs.setCurrentIndex(idx)
+            self._canvas_tabs.setTabToolTip(idx, str(path))
+            if activate:
+                self._canvas_tabs.setCurrentIndex(idx)
 
             self._update_recent_files(path)
 
@@ -3117,8 +3732,10 @@ class SWCMainWindow(QMainWindow):
                 "INFO",
             )
             self.swc_loaded.emit(df.loc[:, SWC_COLS].copy(), filename)
+            return editor
         except Exception as e:
             self._append_log(f"Error loading SWC: {e}", "ERROR")
+            return None
 
     def _on_save(self):
         doc = self._active_document()
@@ -3128,9 +3745,52 @@ class SWCMainWindow(QMainWindow):
         if not doc.file_path:
             self._on_save_as()
             return
-        self._write_swc_file(doc.file_path, doc.df)
+        if not self._write_document_to(doc, doc.file_path, action="Saving"):
+            return
         self._after_document_write(doc, doc.file_path, action_name="Save")
         self._append_log(f"Saved {doc.file_path}", "INFO")
+
+    def _write_document_to(self, doc: _DocumentState, path: str, *, action: str) -> bool:
+        """Write ``doc``'s contents to ``path``; False if nothing was written.
+
+        Never writes silently over data SWC-Studio has not seen:
+
+        - ``path`` is this tab's own file and it changed on disk since the
+          tab read or wrote it: the user chooses (overwrite / reload / cancel);
+        - ``path`` is open in another tab: refused, because that tab would
+          then hold a stale copy and its next edit would undo this write.
+        """
+        other = self._find_open_document(path)
+        if other is not None and other is not doc:
+            QMessageBox.warning(
+                self,
+                "File Is Open",
+                f"{other.filename} is open in another tab.\n\n"
+                f"{action} this tab there would leave two tabs editing different "
+                "versions of one file. Close that tab first, or choose another file name.",
+            )
+            self._append_log(f"Not written: {path} is open in another tab.", "WARN")
+            return False
+        own_file = bool(str(doc.file_path or "").strip()) and _same_path(path, doc.file_path)
+        expected_sha = None
+        if own_file and not doc.is_preview:
+            if not self._confirm_document_write(doc, action=action):
+                return False
+            expected_sha = doc.disk_fingerprint[2] if doc.disk_fingerprint else None
+        try:
+            self._write_swc_file(path, doc.df, expected_sha=expected_sha, keep_file_text=own_file)
+        except _DiskChangedError:
+            self._mark_document_stale(doc)
+            QMessageBox.warning(
+                self,
+                "File Changed on Disk",
+                f"{doc.filename} changed on disk just now, so it was not overwritten.\n\n"
+                "Use File -> Reload from Disk to see its current contents, or save again.",
+            )
+            return False
+        if own_file and not doc.is_preview:
+            self._remember_disk_state(doc)
+        return True
 
     def _on_save_as(self):
         doc = self._active_document()
@@ -3148,13 +3808,17 @@ class SWCMainWindow(QMainWindow):
             self._append_log("Save As cancelled.", "INFO")
             return
 
-        self._write_swc_file(path, doc.df)
+        if not self._write_document_to(doc, path, action="Saving"):
+            return
         doc.file_path = str(path)
         doc.filename = os.path.basename(path)
-        tab_idx = self._canvas_tabs.indexOf(doc.editor)
-        if tab_idx >= 0:
-            self._canvas_tabs.setTabText(tab_idx, doc.filename)
-        self._sync_from_active_document(auto_run_validation=False)
+        if not doc.is_preview:
+            self._remember_disk_state(doc)
+        doc.disk_stale = False
+        self._refresh_document_title(doc)
+        # Validates only if the document has no report yet (one that was
+        # running for the old file name is dropped by the reload).
+        self._sync_from_active_document(auto_run_validation=True)
         self._after_document_write(doc, path, action_name="Save As")
         self._append_log(f"Saved As {path}", "INFO")
         self._update_recent_files(path)
@@ -3174,21 +3838,47 @@ class SWCMainWindow(QMainWindow):
         if not path:
             self._append_log("Export cancelled.", "INFO")
             return
-        self._write_swc_file(path, doc.df)
+        if not self._write_document_to(doc, path, action="Exporting"):
+            return
         self._after_document_write(doc, path, action_name="Export")
         self._append_log(f"Exported {path}", "INFO")
 
-    def _write_swc_file(self, path: str, df: pd.DataFrame):
+    def _write_swc_file(
+        self,
+        path: str,
+        df: pd.DataFrame,
+        *,
+        expected_sha: str | None = None,
+        keep_file_text: bool = False,
+    ):
+        """Write ``df`` to ``path`` atomically.
+
+        With ``expected_sha``, raise ``_DiskChangedError`` instead of writing
+        when the file on disk no longer has those contents. With
+        ``keep_file_text`` (saving a document to its own file), a file that
+        differs from ``df`` only in types and radii keeps all its other bytes.
+        """
         out_path = Path(path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        if expected_sha is not None and out_path.exists():
+            current = _file_fingerprint(out_path)
+            if current is not None and current[2] != expected_sha:
+                raise _DiskChangedError(str(out_path))
         out_df = df.copy()
-        if not getattr(out_df, "attrs", {}).get(SWC_HEADER_ATTR) and out_path.exists():
+        payload = None
+        if keep_file_text and out_path.exists():
             try:
-                previous = parse_swc_text_preserve_tokens(out_path.read_text(encoding="utf-8", errors="ignore"))
+                payload = _field_rewrite_bytes(out_df, out_path.read_bytes())
+            except OSError:
+                payload = None
+        if payload is None and not getattr(out_df, "attrs", {}).get(SWC_HEADER_ATTR) and out_path.exists():
+            try:
+                previous = parse_swc_text_preserve_tokens(_decode_swc_bytes(out_path.read_bytes()))
                 _copy_swc_metadata(out_df, previous)
             except Exception:
                 pass
-        payload = write_swc_to_bytes_preserve_tokens(out_df)
+        if payload is None:
+            payload = write_swc_to_bytes_preserve_tokens(out_df)
         fd, tmp_path = tempfile.mkstemp(prefix=f".{out_path.stem}_", suffix=".tmp", dir=str(out_path.parent))
         try:
             with os.fdopen(fd, "wb") as f:
@@ -3292,20 +3982,27 @@ class SWCMainWindow(QMainWindow):
         old_df = doc.df if isinstance(doc.df, pd.DataFrame) else None
         next_df = df.copy()
         _copy_swc_metadata(next_df, old_df)
-        doc.pending_type_suspicion_issues = None
-        doc.df = next_df
-        doc.validation_report = None
-        doc.issues = []
         if not doc.is_preview:
             # Provenance: every direct editor change is one commit. We
             # mark the source so a future filter can pick out "edits
             # made directly in the table" vs panel-driven mutations.
             from swcstudio.core.provenance import OpKind  # noqa: PLC0415
-            self._record_tracked_commit(
-                doc, doc.df, kind=OpKind.SET_TYPE,
+            if self._record_tracked_commit(
+                doc, next_df, kind=OpKind.SET_TYPE,
                 params={"source": "editor_table", "title": "Manual Labeling"},
                 message="GUI manual labeling",
-            )
+            ) is _COMMIT_CANCELLED:
+                # The editor already shows the edit; put it back to the
+                # document's contents (reloaded from disk, or unchanged).
+                if self._documents.get(editor) is doc:
+                    editor.load_swc(doc.df.loc[:, SWC_COLS].copy(), doc.filename)
+                    editor.set_mode(self._editor_mode_for_feature())
+                return
+        doc.pending_type_suspicion_issues = None
+        doc.df = next_df
+        doc.validation_report = None
+        doc.issues = []
+        if not doc.is_preview:
             self._record_session_operation(
                 doc,
                 title="Manual Labeling",
@@ -3348,6 +4045,15 @@ class SWCMainWindow(QMainWindow):
 
     # --------------------------------------------------- Document tabs/windows
     def _on_document_tab_changed(self, _index: int):
+        # A tab brought forward must not show a stale copy of its file:
+        # reload it if the file changed on disk and the tab has no changes of
+        # its own (otherwise it is marked; editing it then asks first).
+        doc = self._active_document()
+        if doc is not None and not doc.is_preview and self._disk_changed(doc) is not None:
+            if self._document_has_unsaved_edits(doc):
+                self._mark_document_stale(doc)
+            else:
+                self._reload_document_from_disk(doc, reason="it changed on disk", refresh_ui=False)
         self._sync_from_active_document(auto_run_validation=True)
         if self._active_tool in ("morphology_editing", "dendrogram"):
             self._set_control_tabs_for_feature("morphology_editing")
@@ -3504,11 +4210,34 @@ class SWCMainWindow(QMainWindow):
             act.triggered.connect(lambda _=False, sp=p: self._load_swc(sp))
             self._recent_menu.addAction(act)
 
+    def _open_flag_review(self, path: str) -> None:
+        """Load a batch's flag review into the Flag Review window and show it."""
+        if path and not self._flag_review_panel.load(path):
+            return
+        self._flag_review_dock.show()
+        self._flag_review_dock.raise_()
+
+    def _on_flag_review_open_requested(self, paths: list[str]) -> None:
+        """Open cells chosen in the Flag Review window."""
+        # Batch Processing shows its own canvas instead of the document tabs,
+        # and a review usually starts right after a batch: switch to label
+        # editing so the opened cell is actually on screen, even while a
+        # validation runs (it carries on in the background).
+        if self._active_tool == "batch":
+            self._activate_feature("morphology_editing", force=True)
+        self._open_paths(list(paths or []))
+
+    def _set_type_legend_visible(self, visible: bool) -> None:
+        self._type_legend_visible = bool(visible)
+        for doc in self._documents.values():
+            doc.editor.set_type_legend_visible(self._type_legend_visible)
+
     def _reset_layout(self):
         self._data_dock.show()
         self._control_dock.show()
         self._precheck_dock.hide()
         self._auto_guide_dock.hide()
+        self._flag_review_dock.hide()
         try:
             self.setDockOptions(QMainWindow.AnimatedDocks | QMainWindow.AllowNestedDocks | QMainWindow.AllowTabbedDocks)
             self.addDockWidget(Qt.LeftDockWidgetArea, self._data_dock)
@@ -3519,6 +4248,19 @@ class SWCMainWindow(QMainWindow):
         self._append_log("Layout reset (docks movable).", "INFO")
 
     def _apply_issue_state(self, doc: _DocumentState | None):
+        if doc is not None and not doc.is_preview and doc.validation_report is None:
+            # No report for the current contents yet. Say so: an empty list
+            # would read as "0 issues" while validation is still running.
+            if doc.validation_error:
+                message = f"Validation failed: {doc.validation_error}"
+            elif self._validation_tab.is_running():
+                message = "Running validation and issue detectors..."
+            else:
+                message = "Not validated yet."
+            self._issue_panel.clear_issues(message)
+            self._issue_status_label.setText(f"Issues: {message}")
+            doc.editor.set_issue_markers([])
+            return
         issues = list(doc.issues) if doc is not None else []
         self._issue_panel.set_issues(issues)
         self._set_issue_status(issues)
@@ -3571,6 +4313,7 @@ class SWCMainWindow(QMainWindow):
         previous_issue_id = str(doc.selected_issue_id or "").strip()
         previous_issue = self._find_issue_by_id(doc, previous_issue_id)
         doc.validation_report = dict(report)
+        doc.validation_error = ""
         reused_type_suspicion = doc.pending_type_suspicion_issues
         doc.pending_type_suspicion_issues = None
         # Fast path: build the issue list WITHOUT type suspicion so the
@@ -3639,9 +4382,17 @@ class SWCMainWindow(QMainWindow):
             suggested_solution="Click another issue in the left panel to continue.",
         )
 
+    def _on_validation_failed(self, message: str) -> None:
+        doc = self._active_document()
+        if doc is None:
+            return
+        doc.validation_error = str(message or "unknown error").strip() or "unknown error"
+        self._apply_issue_state(doc)
+        self._append_log(f"Validation failed for {doc.filename}: {doc.validation_error}", "ERROR")
+
     # ------------------------------------------------------------------
     # Background type-suspicion worker. The QThread waits on a separate
-    # inference process rather than loading XGBoost/PyTorch into Qt's
+    # inference process rather than loading XGBoost into Qt's
     # process. This avoids macOS crashes caused by incompatible OpenMP
     # runtimes shipped by native scientific wheels.
     # ------------------------------------------------------------------
@@ -3760,13 +4511,15 @@ class SWCMainWindow(QMainWindow):
             remapped_id_count=remapped_id_count,
         )
         from swcstudio.core.provenance import OpKind  # noqa: PLC0415
-        self._record_tracked_commit(
+        if self._record_tracked_commit(
             doc, new_df, kind=OpKind.INDEX_CLEAN,
             params={"original_node_count": original_node_count,
                     "new_node_count": new_node_count,
                     "remapped_id_count": remapped_id_count},
             message=f"GUI validation index-clean ({remapped_id_count} ids remapped)",
-        )
+            id_map=dict(id_map or {}),
+        ) is _COMMIT_CANCELLED:
+            return
         self._apply_document_dataframe(
             doc,
             new_df,
@@ -3966,8 +4719,9 @@ class SWCMainWindow(QMainWindow):
                     "problem_detail": str(issue.get("description", "")).strip() or "Complex multi-node soma format detected.",
                     "suggested_solution": (
                         "Consolidate each connected soma group into one mega-node: isolate connected type-1 nodes, "
-                        "compute the centroid, set the radius to furthest-distance-plus-radius, and rewire all "
-                        "non-soma children to the surviving anchor node."
+                        "compute the centroid, set the radius to that of the sphere with the same surface as the "
+                        "soma points (a 3-point soma keeps its radius), and rewire all non-soma children to the "
+                        "surviving anchor node."
                     ),
                     "custom_primary_label": "Consolidate Soma",
                     "custom_primary_action": "consolidate_soma",
@@ -3978,7 +4732,8 @@ class SWCMainWindow(QMainWindow):
                         "Consolidation steps:",
                         "1. Group connected soma nodes (type 1) by topology.",
                         "2. Replace each group with one mega-node at the centroid.",
-                        "3. Set radius to furthest-node distance plus that node's radius.",
+                        "3. Set the radius to that of the sphere with the same surface as the soma points "
+                        "(a 3-point soma keeps its radius).",
                         "4. Rewire all axon/dendrite children to the new anchor node.",
                         "",
                         *preview,
@@ -4376,23 +5131,26 @@ class SWCMainWindow(QMainWindow):
                 id_map=dict(id_map or {}) if isinstance(id_map, dict) else None,
                 change_rows=list(change_rows or []) if isinstance(change_rows, list) else None,
             )
-        self._sync_from_active_document(auto_run_validation=False)
+        # Only the shown document's panels need refreshing; re-syncing them
+        # for another tab's change would also cancel its running validation.
+        if doc is self._active_document() or doc is self._active_source_document():
+            self._sync_from_active_document(auto_run_validation=False)
 
     def _rerun_active_validation(self, *, resolved_issue_id: str | None = None):
         doc = self._active_document()
         if doc is None:
             return
-        self._validation_tab.stop_worker(wait_ms=5000)
         if resolved_issue_id:
             doc.pending_resolved_issue_ids.add(str(resolved_issue_id))
             doc.issue_status_overrides.pop(str(resolved_issue_id), None)
         doc.validation_report = None
-        self._issue_panel.clear_issues("Running validation and issue detectors...")
-        self._set_issue_status([])
-        doc.editor.set_issue_markers([])
+        doc.validation_error = ""
         doc.editor.clear_selection()
+        # Loading the new contents drops any validation still running for
+        # the old ones (without waiting for it), then a fresh run starts.
         self._validation_tab.load_swc(doc.df, doc.filename, file_path=doc.file_path, auto_run=False)
         self._validation_tab.run_validation()
+        self._apply_issue_state(doc)
 
     def _find_issue_by_id(self, doc: _DocumentState | None, issue_id: str) -> dict | None:
         if doc is None:
@@ -4520,12 +5278,13 @@ class SWCMainWindow(QMainWindow):
                 applied.append(f"Node {node_id}: {old_radius:.5g} -> {new_radius:.5g}")
             if not applied:
                 return
-            self._record_tracked_commit(
+            if self._record_tracked_commit(
                 doc, df, kind=OpKind.AUTO_FIX,
                 params={"issue_id": str(issue_id), "fix_kind": "radii_outlier_batch",
                         "applied_count": len(applied)},
                 message=f"GUI apply suggested radii: issue={issue_id} ({len(applied)} nodes)",
-            )
+            ) is _COMMIT_CANCELLED:
+                return
             self._apply_document_dataframe(
                 doc,
                 df,
@@ -4554,12 +5313,13 @@ class SWCMainWindow(QMainWindow):
                 applied.append(f"Node {node_id}: {old_type} -> {new_type}")
             if not applied:
                 return
-            self._record_tracked_commit(
+            if self._record_tracked_commit(
                 doc, df, kind=OpKind.AUTO_FIX,
                 params={"issue_id": str(issue_id), "fix_kind": "type_suspicion_batch",
                         "applied_count": len(applied)},
                 message=f"GUI apply suggested labels: issue={issue_id} ({len(applied)} nodes)",
-            )
+            ) is _COMMIT_CANCELLED:
+                return
             self._apply_document_dataframe(
                 doc,
                 df,
@@ -4681,13 +5441,14 @@ class SWCMainWindow(QMainWindow):
             if not changed:
                 event_details.append("No connected multi-node soma groups required consolidation.")
             from swcstudio.core.provenance import OpKind  # noqa: PLC0415
-            self._record_tracked_commit(
+            if self._record_tracked_commit(
                 doc, new_df, kind=OpKind.PLUGIN_OP,
                 params={"plugin": "consolidate_soma", "issue_id": str(issue_id),
                         "group_count": int(result.get("group_count", 0)),
                         "removed_nodes": removed_nodes, "changed": changed},
                 message=f"GUI consolidate-soma (issue {issue_id})",
-            )
+            ) is _COMMIT_CANCELLED:
+                return
             self._apply_document_dataframe(
                 doc,
                 new_df,
@@ -4926,7 +5687,8 @@ class SWCMainWindow(QMainWindow):
             "1) Top menu row: File/Edit/View/Window/Help dropdown menus.\n"
             "2) Tools bar: choose a tool, then choose its feature row under it.\n"
             "3) Issue Navigator and Inspector are dock windows (close, float, resize, move).\n"
-            "4) You can open multiple SWC files as canvas tabs.\n"
+            "4) You can open multiple SWC files as canvas tabs (select several in File -> Open); "
+            "Window -> Next File / Previous File (Ctrl+Tab / Ctrl+Shift+Tab) moves between them.\n"
             "5) Drag a canvas tab outside the tab bar to detach it into a floating window.\n"
             "6) Closing a SWC tab/window always asks for confirmation; edited SWC copies are only written when you confirm the close-save dialog.\n"
             "7) Opening an SWC runs checks and populates the Issue Navigator automatically.\n"
@@ -4937,12 +5699,19 @@ class SWCMainWindow(QMainWindow):
         self._append_log(text, "HELP")
 
     def _show_shortcuts(self):
+        next_keys = QKeySequence(QKeySequence.NextChild).toString(QKeySequence.NativeText)
+        # Qt names Shift+Tab "Backtab"; users know it as Shift+Tab.
+        previous_keys = (
+            QKeySequence(QKeySequence.PreviousChild).toString(QKeySequence.NativeText).replace("Backtab", "Tab")
+        )
         text = (
-            "Ctrl+O: Open\n"
+            "Ctrl+O: Open (select several files to open them all)\n"
             "Ctrl+S: Save\n"
             "Ctrl+Shift+S: Save As\n"
             "Ctrl+Z: Undo\n"
-            "Ctrl+Shift+Z: Redo"
+            "Ctrl+Shift+Z: Redo\n"
+            f"{next_keys}: Next open file\n"
+            f"{previous_keys}: Previous open file"
         )
         self._show_help_text_dialog("Shortcuts", text)
         self._append_log(text, "HELP")
@@ -4954,6 +5723,12 @@ class SWCMainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             versions = {"app": "unknown", "models": "unknown"}
         install_flavor = "bundled executable" if getattr(sys, "frozen", False) else "pip/source environment"
+        try:
+            from swcstudio.core.model_paths import labeler_info
+            labeler = labeler_info()
+            labeler_text = f"SWC auto-labeler {labeler['version']} ({labeler['source_commit'][:10]})"
+        except Exception:  # noqa: BLE001
+            labeler_text = "unknown"
         text = (
             "SWC-Studio is an issue-driven workspace for inspecting, repairing, "
             "and exporting neuron morphology files in SWC format.\n\n"
@@ -4961,23 +5736,11 @@ class SWCMainWindow(QMainWindow):
             "same validation and editing logic can be used interactively or in scripts.\n\n"
             f"App code version: {versions.get('app', 'unknown')}\n"
             f"Models version: {versions.get('models', 'unknown')}\n"
-            f"Install flavor: {install_flavor}\n"
-            "Use Help -> GPU Readiness to check whether this environment can run GPU mode."
+            f"Auto-labeler: {labeler_text}\n"
+            f"Install flavor: {install_flavor}"
         )
         self._show_help_text_dialog("About SWC-Studio", text)
         self._append_log("Opened About dialog.", "INFO")
-
-    def _show_gpu_readiness_dialog(self):
-        try:
-            from swcstudio.core.gpu_status import format_gpu_readiness
-            text = format_gpu_readiness()
-        except Exception as e:  # noqa: BLE001
-            text = (
-                "Could not run the GPU readiness checker.\n\n"
-                f"{e.__class__.__name__}: {e}"
-            )
-        self._show_help_text_dialog("GPU Readiness", text)
-        self._append_log("Opened GPU readiness checker.", "INFO")
 
     # ----- History menu handlers (PROVENANCE_SPEC §14) -----
     def _on_open_history_browser(self):

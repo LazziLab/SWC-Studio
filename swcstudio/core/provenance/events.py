@@ -161,6 +161,18 @@ class Event:
         )
 
 
+def _with_string_keys(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {
+            (k if isinstance(k, str) or not isinstance(k, (int, float, bool, type(None))) else json.dumps(k)):
+                _with_string_keys(v)
+            for k, v in obj.items()
+        }
+    if isinstance(obj, (list, tuple)):
+        return [_with_string_keys(v) for v in obj]
+    return obj
+
+
 def canonical_json(obj: Any) -> bytes:
     """Deterministic UTF-8 JSON encoding for hashing and writing.
 
@@ -175,9 +187,13 @@ def canonical_json(obj: Any) -> bytes:
     * ``allow_nan=False`` — NaN/Inf are not JSON-representable; if a
       caller tries, we raise rather than silently produce a
       non-portable value
+    * non-string keys converted to their JSON text first — ``json``
+      writes ``{2: …, 10: …}`` with keys sorted as numbers, but once read
+      back from the log they are strings and sort as ``"10"``, ``"2"``,
+      so the same object would hash differently on re-check
     """
     return json.dumps(
-        obj,
+        _with_string_keys(obj),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,

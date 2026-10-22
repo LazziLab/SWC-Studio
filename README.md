@@ -47,32 +47,42 @@ Three supported install paths, depending on what you need.
 Use this path if you only need the desktop application and don't want to deal with Python.
 
 1. Open <https://github.com/LazziLab/SWC-Studio/releases/latest>
-2. Download `SWC-Studio-v0.2.0-macOS.zip` or `SWC-Studio-v0.2.0-Windows.zip`
+2. Download `SWC-Studio-vX.Y.Z-macOS.zip` or `SWC-Studio-vX.Y.Z-Windows.zip` (X.Y.Z is the latest version)
 3. Extract and launch:
-   - **macOS** — drag `SWC-Studio.app` into `/Applications`, then double-click. First launch needs `xattr -cr /Applications/SWC-Studio.app` or right-click → Open (the bundle is not yet code-signed).
+   - **macOS** (Apple silicon) — drag `SWC-Studio.app` into `/Applications`, then double-click. The app is not yet signed by Apple, so the first time macOS blocks it: open **System Settings → Privacy & Security**, click **Open Anyway** next to "SWC-Studio was blocked", and confirm. Or run `xattr -cr /Applications/SWC-Studio.app` once in Terminal. See [First launch on macOS](docs/GETTING_STARTED.md#first-launch-on-macos). On an Intel Mac, use Option 2.
    - **Windows** — extract anywhere and run the `.exe` inside.
 
-Models are bundled inside the app — no separate download.
+The auto-labeling models are bundled inside the app, so no separate
+download is needed.
 
-Release executables are intended to be portable CPU builds; use pip or
-source install for GPU acceleration.
+Auto-labeling runs the SWC auto-labeler, version 1.0.1
+(<https://github.com/LazziLab/swc-autolabeler>), on every file:
 
-Auto-labeling runs in three stages on every file:
+1. **Structural checks** (Stage 0). The file must hold one connected
+   cell with a soma, between 10 and 200,000 nodes, finite coordinates,
+   and finite, non-negative radii. A file without a soma label takes its
+   root as the soma. A file that fails is not labeled, and the error
+   lists the reasons.
+2. **Cell class** (Stage 1). 3-class cells get axon, basal dendrite and
+   apical dendrite labels. 2-class cells get axon and dendrite labels.
+   Stage 1 decides the class from the cell's shape, or you choose it.
+3. **Labeling** (Stages 2 and 3). A gradient-boosted classifier labels
+   each primary subtree that leaves the soma. Topology rules follow,
+   and for 3-class cells a learned correction re-decides branches near
+   the soma.
+4. **Quality flag** (Stage 4). The flag predicts how well each cell was
+   labeled (its per-cell F1). One file is flagged when that falls below
+   the flag's cut-off. A batch flags the riskiest share of each cell
+   class (10% by default), and the Flag Review window lists every cell,
+   riskiest first.
 
-1. **QC gate** — checks whether the morphology is structurally valid
-   and within the trained distribution. Files that fail QC are rejected
-   with a specific reason (multi-soma, malformed rows, cycles, etc.) so
-   nothing is mislabeled silently.
-2. **Labeling model** — assigns each node a soma / axon / basal-dendrite
-   / apical-dendrite type. Pyramidal and interneuron cells are handled
-   in the same call; no manual cell-type selection is required.
-3. **Flag scoring** — surfaces the individual labels the model is least
-   confident about so a reviewer can focus attention. Flagged nodes
-   appear in the GUI issue panel and in the CLI JSON output.
+Input files do not need labels: the labels are predicted from geometry.
+Auto-labeling runs on the CPU and needs no GPU.
 
-The first inference initializes the ML runtime and models; later
-in-process runs reuse cached objects, and an applied GUI label is
-reused by the next validation refresh instead of being recomputed.
+The first labeling run in a process reads the model files; later runs in
+the same process reuse them. After you apply an auto-label result in the
+GUI, the next validation refresh reuses it instead of labeling the cell
+again.
 
 ### macOS system packages (Options 2 and 3)
 
@@ -130,14 +140,13 @@ swcstudio doctor
 swcstudio-gui          # launch the desktop GUI
 swcstudio --help       # CLI
 swcstudio models status
-swcstudio gpu-status
 ```
 
 Requires Python 3.10, 3.11, or 3.12. Pip installs the scientific,
 ML, GUI, and history dependencies into the active environment. The
-wheel also contains all runtime JSON configuration and the eight
-production auto-labeling models, so first inference does not require a
-separate model download, requirements file, or GUI extra.
+wheel also contains all runtime JSON configuration and the four model
+files of the SWC auto-labeler, so the first auto-label run does not
+require a separate model download, requirements file, or GUI extra.
 
 For a clean isolated install:
 
@@ -191,8 +200,7 @@ build tools with `python -m pip install -e ".[dev]"`.
 ```bash
 swcstudio --help
 swcstudio doctor            # import packages and deserialize every model
-swcstudio models status     # confirm the auto-typing models are reachable
-swcstudio gpu-status        # optional CUDA/PyTorch readiness check
+swcstudio models status     # confirm the auto-labeler's models are found
 ```
 
 If the console scripts aren't on your path, fall back to module mode:
@@ -208,26 +216,17 @@ How you update depends on how you installed:
 
 | Install method | How to update |
 |---|---|
-| **Option 1** (bundled app) | Help → **Check for Updates** in the GUI. The in-app updater downloads only the changed layer (~5 MB code or ~80 MB models), no full re-download required. |
+| **Option 1** (bundled app) | Help → **Check for Updates** in the GUI. The in-app updater downloads only the changed layer (code or models), no full re-download required. |
 | **Option 2** (pip) | `python -m pip install --upgrade swcstudio` installs the matching code, dependencies, configuration, and bundled models. |
 | **Option 3** (source) | `git pull` followed by `python -m pip install -e .` to pick up any new dependencies or metadata. |
 
 Under the hood, releases are split into three independently-updatable layers — runtime (heavy libraries), code (`swcstudio/` package), and models — so most updates touch only the small layers. See [`packaging/MODULAR_BUILD.md`](packaging/MODULAR_BUILD.md) for the architecture and [`RELEASE.md`](RELEASE.md) for the release pipeline.
 
-## CPU Executable And GPU Installs
-
-The one-click executable is the reliable CPU distribution. A GPU
-PyTorch/CUDA bundle is much larger and less portable across driver and
-CUDA combinations. Advanced users who want GPU acceleration should use a
-pip or source install, then follow [`docs/GPU_INSTALL.md`](docs/GPU_INSTALL.md).
-Inside SWC-Studio, choose Help -> GPU Readiness or run
-`swcstudio gpu-status` to see what is installed and what is missing.
-
 ## Core Capabilities
 
 - issue-driven SWC validation and repair
 - batch processing workflows
-- auto-labeling of soma / axon / basal / apical (with optional retraining on your own data)
+- auto-labeling of soma / axon / basal / apical, with a quality flag that ranks cells for review (and optional retraining on your own data)
 - radii cleaning
 - manual morphology and geometry editing
 - shared GUI, CLI, and Python integration surface
@@ -241,7 +240,11 @@ visible encrypted `<stem>_history.swcstudio` repo archive containing the
 append-only event log, content-addressed `.zst` blob store, refs, and
 SQLite query index. SWC headers carry a bounded `# @PROV` pointer to
 that archive and its repo ID, so renamed files can be reattached to
-their history. User-facing operations are numbered independently for
+their history. The archive's default password ships with the app: it
+discourages hand edits but does not make the history private (set
+`SWCSTUDIO_HISTORY_PASSWORD` for that). `swcstudio history verify`
+re-checks the SHA-256 hashes, which catches corruption and accidental
+damage, though not deliberate edits by someone who recomputes them. User-facing operations are numbered independently for
 each file as `op-1`, `op-2`, and so on, including files handled by a
 batch. AI ops capture an MLflow-shaped run record plus a full
 environment fingerprint for reproducibility. CLI: `swcstudio history

@@ -12,6 +12,7 @@ from swcstudio.core.reporting import (
     timestamp_slug,
     write_text_report,
 )
+from swcstudio.core.swc_io import is_swc_data_file
 from swcstudio.core.validation_engine import run_validation_text
 from swcstudio.plugins.registry import register_builtin_method, resolve_method
 
@@ -56,12 +57,12 @@ def validate_folder(folder: str, *, config_overrides: dict | None = None) -> dic
         raise NotADirectoryError(folder)
 
     exts = {e.lower() for e in cfg.get("include", {}).get("extensions", [".swc"])}
-    swc_files = sorted(p for p in in_dir.iterdir() if p.is_file() and p.suffix.lower() in exts)
+    swc_files = sorted(p for p in in_dir.iterdir() if is_swc_data_file(p, extensions=exts))
 
     rows: list[dict[str, Any]] = []
     failures = []
     precheck: list[dict[str, Any]] = []
-    agg = {"total": 0, "pass": 0, "warning": 0, "fail": 0}
+    agg = {"total": 0, "pass": 0, "info": 0, "warning": 0, "fail": 0}
 
     for fp in swc_files:
         try:
@@ -72,6 +73,7 @@ def validate_folder(folder: str, *, config_overrides: dict | None = None) -> dic
             summary = dict(report.get("summary", {}))
             agg["total"] += int(summary.get("total", 0))
             agg["pass"] += int(summary.get("pass", 0))
+            agg["info"] += int(summary.get("info", 0))
             agg["warning"] += int(summary.get("warning", 0))
             agg["fail"] += int(summary.get("fail", 0))
             rows.append({"file": fp.name, "report": report})

@@ -1,7 +1,7 @@
 """QThread-friendly workers for the auto-typing engine.
 
-The auto-typing engine is CPU-bound (sklearn predict + GraphSAGE
-forward pass) and can take seconds to minutes per file. Running it on
+The auto-typing engine is CPU-bound (feature extraction and XGBoost
+prediction) and can take seconds per file. Running it on
 the GUI thread would freeze the window. These QObject workers wrap
 the engine calls so the panels can run them on a ``QThread`` and stay
 responsive.
@@ -226,8 +226,8 @@ class _TypeSuspicionWorker(QObject):
     ``Likely wrong labels`` issues. Used by the GUI to compute type
     suspicion off the main thread so the issue panel can show its
     fast-path entries (validation, radii, simplification suggestion)
-    immediately instead of blocking ~1-2 seconds while the full v12
-    QC-label-flag pipeline runs.
+    immediately instead of blocking ~1-2 seconds while the auto-labeler
+    runs.
     """
 
     finished = Signal(int, object)  # run_id, list[dict]

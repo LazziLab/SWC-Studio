@@ -11,23 +11,50 @@ Layers:
 import os as _os
 import sys as _sys
 
-# macOS ships xgboost and torch wheels that both dlopen libomp.dylib; once
-# both are loaded into the same process, concurrent OpenMP regions segfault
-# on arm64 (xgboost 3.2 + torch 2.12 reproduces with any OMP_NUM_THREADS>1).
-# KMP_DUPLICATE_LIB_OK silences the duplicate-load fast-fail; pinning OpenMP
-# to a single thread is what actually keeps auto-label inference alive.
-# setdefault lets power users override either knob; revisit when xgboost or
-# torch ships an arm64 OpenMP fix.
+# Several macOS wheels, xgboost among them, ship their own libomp.dylib; with
+# two copies loaded into one process, concurrent OpenMP regions can segfault on
+# arm64. KMP_DUPLICATE_LIB_OK silences the duplicate-load fast-fail; pinning
+# OpenMP to a single thread keeps auto-label inference alive. setdefault lets
+# power users override either knob.
 if _sys.platform == "darwin":
     _os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     _os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
+
+def _source_tree_version() -> str:
+    # Local source checkout before installation: pyproject.toml is the one
+    # place the version is set, so read it rather than repeat it here.
+    import re as _re
+
+    pyproject = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "pyproject.toml")
+    try:
+        with open(pyproject, encoding="utf-8") as fh:
+            match = _re.search(r'^version\s*=\s*"([^"]+)"', fh.read(), _re.MULTILINE)
+    except OSError:
+        match = None
+    return match.group(1) if match else "0+unknown"
+
+
+def _code_layer_version(package_dir: str | None = None) -> str | None:
+    # The desktop app loads this package from a replaceable code layer with
+    # a VERSION file beside it (packaging/swcstudio_bootstrap.py). The
+    # installed metadata there belongs to the runtime and goes stale after
+    # a code-only update, so the layer's own VERSION wins.
+    if _os.environ.get("SWCSTUDIO_BUNDLE_FLAVOR") != "modular":
+        return None
+    package_dir = package_dir or _os.path.dirname(__file__)
+    try:
+        with open(_os.path.join(_os.path.dirname(package_dir), "VERSION"), encoding="utf-8") as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
+
+
 try:
-    __version__ = _pkg_version("swcstudio")
+    __version__ = _code_layer_version() or _pkg_version("swcstudio")
 except PackageNotFoundError:
-    # Local source checkout before installation.
-    __version__ = "0.1.0"
+    __version__ = _source_tree_version()
 
 __all__ = ["api", "core", "tools", "plugins", "cli", "gui", "__version__"]

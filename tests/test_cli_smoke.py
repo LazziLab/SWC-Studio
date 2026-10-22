@@ -96,6 +96,12 @@ class CLISmokeTests(unittest.TestCase):
         )
         return result
 
+    def test_version_flag(self) -> None:
+        from swcstudio import __version__
+
+        result = self._run_cli("--version")
+        self.assertEqual(result.stdout.strip(), f"swcstudio {__version__}")
+
     def test_check_and_batch_commands(self) -> None:
         file_path = self._copy_file_fixture("check")
         folder_validate = self._copy_folder_fixture("batch_validate")

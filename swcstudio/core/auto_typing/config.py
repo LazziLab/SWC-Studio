@@ -1,10 +1,10 @@
 """Persisted user-facing configuration for the auto-typing feature.
 
-The auto-typing engine itself is the v12 QC-label-flag pipeline. The
-runtime knobs end users edit are model directory overrides, optional
-cell-type override, and compact flag scoring strictness. They live in the same
-JSON config the Batch Processing tool already persists, so the GUI / CLI
-continue to read and write a single file.
+The runtime knobs end users edit are a model directory override, the cell class
+(automatic, 3-class or 2-class), whether the quality flag runs, and the share of
+each cell class a batch flags for review. They live in the same JSON config the
+Batch Processing tool already persists, so the GUI / CLI read and write a single
+file.
 """
 from __future__ import annotations
 
@@ -18,11 +18,9 @@ FEATURE = "auto_typing"
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": True,
     "model_dir": "",
-    "use_subtree_stage2": True,
-    "cell_type": "unknown",
+    "cell_type": "auto",
     "flag_enabled": True,
-    "flag_strictness": 0.5,
-    "flag_feature_mode": "compact",
+    "flag_budget": 0.10,
 }
 
 _CACHED: dict[str, Any] | None = None

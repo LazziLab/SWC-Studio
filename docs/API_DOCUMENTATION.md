@@ -30,29 +30,24 @@ Source: `swcstudio/api.py`
 
 Dataclass for auto-typing input options:
 
-- `soma: bool` (default `True`)  — write predicted soma label
-- `axon: bool` (default `True`)  — accept predicted axon labels
-- `basal: bool` (default `True`) — accept predicted basal labels
-- `apic: bool` (default `True`) - accept predicted apical labels
-- `rad: bool` (default `False`)  — apply "copy parent radius if zero"
-  fix to zero-radius nodes
-- `zip_output: bool` (default `False`) — write a zip of the output
-  folder (folder runs only)
-- `cell_type: str | None` (default `None`) - `None` / `"unknown"` runs
-  Stage 1; `"pyramidal"` or `"interneuron"` bypasses Stage 1 with the
-  user-provided type
-- `flag_enabled: bool` (default `True`) - run learned bad-label flag scoring
-- `flag_strictness: float` (default `0.5`) - controls how conservative
-  flagging is; higher values are stricter and may flag more cells
-- `flag_feature_mode: str` (default `"compact"`) - compatibility field;
-  SWC-Studio deploys the compact flagger only. `"simple"` is accepted
-  as an alias.
+- `soma: bool` (default `True`): write the predicted soma label
+- `axon: bool` (default `True`): write predicted axon labels
+- `basal: bool` (default `True`): write predicted basal labels
+- `apic: bool` (default `True`): write predicted apical labels
+- `rad: bool` (default `False`): copy the parent's radius onto nodes
+  whose radius is not positive
+- `zip_output: bool` (default `False`): write a zip of the output
+  folder (`run_batch` only)
+- `cell_type: str | None` (default `None`): the cell class. `None` or
+  `"auto"` lets Stage 1 decide. `"3-class"` (axon, basal, apical) or
+  `"2-class"` (axon, dendrite) chooses it; the labeler's names
+  `"pyramidal"` and `"interneuron"` are accepted too.
+- `flag_enabled: bool` (default `True`): score the quality flag
+- `flag_budget: float` (default `0.10`): in a batch, the share of each
+  cell class flagged for review, riskiest first
 
-Current flag feature mode:
-
-- `compact` — bundled learned flagger that scores how likely each
-  predicted label is wrong, using features the labeling stage already
-  computed.
+A label type that is switched off keeps the file's original type on
+those nodes.
 
 #### `BatchResult`
 
@@ -60,17 +55,27 @@ Returned by folder runs (`run_batch` / `batch_auto_typing`). Fields
 include `folder`, `out_dir`, `zip_path`, `files_total`, `files_processed`,
 `files_failed`, `files_qc_failed`, `total_nodes`, `total_type_changes`,
 `total_radius_changes`, `failures`, `per_file`, `log_path`,
-`files_flagged`, and `commits`. `out_dir` and `log_path` are `None` for
-the tracked in-place batch feature; each `commits` item identifies the
-file's independent commit SHA, branch, and operation ID.
+`files_flagged`, `commits`, `flag_records`, `flag_review_path`, and
+`flag_budget`. `flag_records` holds one record per file for the Flag
+Review window. `out_dir` and `log_path` are `None` for the tracked
+in-place batch feature; each `commits` item identifies the file's
+independent commit SHA, branch, and operation ID.
 
 #### `FileResult`
 
 Returned by single-file runs (`run_file`). Fields include `input_file`,
 `output_file`, `nodes_total`, `type_changes`, `radius_changes`,
-`out_type_counts`, `cell_type`, `cell_type_source`, `stage1_confidence`,
-`qc_result`, `flag_result`, `failures`, `change_details`, `log_path`,
+`out_type_counts`, `cell_type`, `cell_type_source`, `stage1_cell_type`,
+`stage1_confidence`, `class_mismatch`, `qc_result`, `flag_result`,
+`notes`, `labeler_version`, `failures`, `change_details`, `log_path`,
 `headers`, `rows`, `types`, `radii`.
+
+`cell_type` is the class used for labeling, by the labeler's name
+(`"pyramidal"` for 3-class, `"interneuron"` for 2-class).
+`cell_type_source` is `"user"` or `"stage1"`. `flag_result` holds
+`enabled`, `flagged`, `predicted_f1`, `suspicion` (1 minus the predicted
+F1), `threshold`, `flagged_by_threshold` and `reason`; it is `None` when
+the flag is off.
 
 ### Batch Processing
 
@@ -84,23 +89,34 @@ Splits each SWC by soma-root trees. Each derived output receives its own
 history archive and lineage back to the source; the result includes
 `output_commits`.
 
-#### `batch_auto_typing(folder, *, options=None, config_overrides=None) -> BatchResult`
+#### `batch_auto_typing(folder, *, options=None, config_overrides=None, progress_callback=None) -> BatchResult`
 
-Runs the auto-typing engine over a folder. There is no backend
-selector — the engine is a single ML pipeline. This convenience
-feature updates each source independently and returns
-its commit details in `BatchResult.commits`. The `config_overrides` dict
-accepts:
+Runs the SWC auto-labeler over every SWC file in a folder. Each labeled
+source file is updated in place and gets its own history commit; the
+commit details are in `BatchResult.commits`. Files that are not labeled
+are listed in `BatchResult.failures`.
 
-- `model_dir` (str) — override the model search path
-- `use_subtree_stage2` (bool, default `True`) — whether Stage 2
-  operates on full primary subtrees
-- `cell_type` (str, default `"unknown"`) - use `"unknown"` to run
-  Stage 1, or provide `"pyramidal"` / `"interneuron"` to bypass it
-- `flag_enabled` (bool, default `True`) - enable learned flag scoring
-- `flag_strictness` (float, default `0.5`) - control flag conservatism
-- `flag_feature_mode` (str, default `"compact"`) - compatibility field;
-  compact flagging is always used
+When the quality flag is on, each cell class flags its riskiest share
+(the flag budget, 10% by default), and the ranking is written into the
+folder as `<folder>_flag_review_<timestamp>.json` with a `.csv` copy.
+`BatchResult.flag_review_path` points to it, and
+`BatchResult.flag_records` holds the same records.
+
+The `config_overrides` dict is merged into the auto-typing configuration
+file for this run. It accepts:
+
+- `model_dir` (str): use this model folder; it is the only folder
+  searched
+- `cell_type` (str, default `"auto"`): `"auto"` lets Stage 1 decide;
+  `"3-class"` or `"2-class"` chooses the class
+- `flag_enabled` (bool, default `True`): score the quality flag
+- `flag_budget` (float, default `0.10`): the share of each cell class
+  flagged for review
+
+`cell_type`, `flag_enabled` and `flag_budget` apply only when you pass
+no `options`; otherwise the `BatchOptions` values are used.
+`progress_callback(index, total, file_name)` is called once per file,
+before the file is labeled.
 
 #### `batch_radii_cleaning(folder, *, config_overrides=None) -> dict`
 
@@ -139,57 +155,99 @@ Runs sanitize + validation from text.
 
 Runs sanitize + validation from file, optionally writes output.
 
-#### `validation_auto_typing_file(file_path, *, options=None, config_overrides=None, output_path=None, write_output=True, write_log=True)`
+#### `validation_auto_typing_file(file_path, *, options=None, config_overrides=None, output_path=None, write_output=True, write_log=True) -> FileResult`
 
-Runs the shared auto-typing engine on a single file. The
-`config_overrides` dict accepts the same keys as `batch_auto_typing`:
-`model_dir` (override the model search path), `use_subtree_stage2`
-(default `True`), `cell_type`, `flag_enabled`, `flag_strictness`, and
-`flag_feature_mode`.
+Runs the SWC auto-labeler on a single file and returns a `FileResult`.
+It does not change the input file. By default it writes a labeled copy
+and a text report into `<stem>_swc_studio_output/`; `write_output` and
+`write_log` turn these off. The `config_overrides` dict accepts
+the same keys as `batch_auto_typing`: `model_dir`, `cell_type`,
+`flag_enabled`, and `flag_budget`. Without `options`, the options come
+from the configuration file merged with `config_overrides`.
 
-When flag scoring runs, `FileResult.flag_result` includes the selected
-model path, `requested_feature_mode`, `actual_feature_mode`,
-`rank_score`, `prob_bad`, the selected threshold, `flagged`, and
-`n_baseline_features`. In SWC-Studio, `actual_feature_mode` is
-`"compact"` and `n_baseline_features` is zero.
+`FileResult.flag_result` holds the quality flag: `enabled`, `flagged`,
+`predicted_f1`, `suspicion`, `threshold`, `flagged_by_threshold`,
+`reason`, `cell_type`, `stage1_cell_type`, and `stage1_confidence`. A
+single file is flagged when its predicted per-cell F1 falls below the
+flag's fixed cut-off, or when the chosen cell class differs from Stage
+1's prediction.
+
+#### `validation_auto_label_file(file_path, *, options=None, config_overrides=None, output_path=None, write_output=True, write_log=False) -> dict`
+
+Runs the auto-labeler on one file and returns a dict with the labeled
+SWC (`bytes`, `dataframe`) and the result fields (`nodes_total`,
+`type_changes`, `out_type_counts`, `cell_type`, `cell_type_source`,
+`stage1_cell_type`, `stage1_confidence`, `class_mismatch`, `notes`,
+`labeler_version`, `qc_result`, `flag_result`, `change_details`). Only
+node types change; the rest of each row is kept as written. With
+`write_output=True` it writes a labeled copy and leaves the input file
+unchanged.
 
 The CLI `swcstudio auto-label` command wraps this in the provenance
-history layer and updates the source SWC in place. The Python helper
-keeps its explicit `output_path` / `write_output` options for scripted
-workflows that need separate files.
+history layer and writes the labels back into the source SWC.
 
-#### `swcstudio.core.auto_typing.run_file(file_path, opts, *, model_dir=None, output_path=None, write_output=True, write_log=True, use_subtree_stage2=True) -> FileResult`
+#### `swcstudio.core.auto_typing.run_file(file_path, opts, *, output_path=None, write_output=True, write_log=True, model_dir=None) -> FileResult`
 
 Direct engine entry point for a single file. The convenience wrappers
 `validation_auto_typing_file` and `validation_auto_label_file` call
-into this.
+into this. It raises `ValueError` for a file that fails the structural
+checks (the message says `QC rejected` and lists the reasons) or holds
+several disconnected soma groups.
 
-#### `swcstudio.core.auto_typing.run_batch(folder, opts, *, model_dir=None, use_subtree_stage2=True) -> BatchResult`
+#### `swcstudio.core.auto_typing.run_batch(folder, opts, *, model_dir=None, progress_callback=None) -> BatchResult`
 
 Direct engine entry point for a folder run. Unlike the tracked
-`batch_auto_typing` convenience feature, this lower-level engine retains
-its explicit output-directory/zip behavior for scripted workflows.
+`batch_auto_typing` convenience feature, it leaves the input files
+unchanged. It writes labeled copies into
+`<folder>/<folder>_batch_auto_typing_<timestamp>/`, together with a
+text report and, when the flag is on, the flag review
+(`flag_review.json` and `flag_review.csv`). It can also zip the copies
+(`opts.zip_output`).
+
+#### `swcstudio.core.auto_typing.apply_flag_budget(records, budget) -> None`
+
+Decides `flagged` for each record of a batch, in place. Each cell class
+flags its riskiest `budget` share, ranked by suspicion and rounded to
+the nearest cell. A class with fewer than `1 / budget` cells uses the
+flag's fixed cut-off. A class mismatch is always flagged; files that
+were not labeled are never flagged. The Flag Review window calls it
+when you change the share.
+
+#### `swcstudio.core.auto_typing.write_flag_review(json_path, records, *, budget, folder, timestamp, labeler_version=None) -> Path`
+
+Writes a batch's flag review to `json_path` and a CSV copy with the same
+name beside it. The Flag Review window reads this file.
+
+#### `swcstudio.core.auto_typing.normalize_cell_class(raw)` and `cell_class_name(cell_type)`
+
+`normalize_cell_class` turns `"auto"`, `"3-class"`, `"2-class"`,
+`"pyramidal"` or `"interneuron"` into the labeler's name, or `None` for
+automatic. `cell_class_name` turns the labeler's name back into
+`"3-class"`, `"2-class"` or `"auto"`.
 
 #### `swcstudio.core.auto_typing.is_available(*, model_dir=None) -> tuple[bool, str]`
 
-Check whether the engine can run with the current model directory.
-Used by the GUI to update the live "models OK / models missing"
-indicator and by the CLI to fail fast before doing any work.
+Check whether the engine can run: it needs a complete model folder and
+the packages the labeler imports (joblib, scikit-learn, XGBoost and
+pandas). Used by the GUI for the `ready` / `unavailable` indicator next
+to the model folder picker, and by the CLI to fail fast before doing
+any work.
 
 #### `swcstudio.core.auto_typing.backend_status(*, model_dir=None) -> dict`
 
-Structured status report — which model files were found, where, and
-whether torch is available for the GNN heads. Flag models are reported
-as the bundled `flag_model_*.joblib` files (one per cell-type class
-plus an all-classes fallback).
+Structured status report, as printed by `swcstudio models status`: the
+labeler version and commit, the model folder found, the path and status
+of each model file, and a description of where the resolver looked.
 
-#### `swcstudio.core.auto_typing_train.train_user_models(data_dir, output_dir, *, train_gnn=True, ...) -> TrainingResult`
+#### `swcstudio.core.auto_typing_train.train_user_models(data_dir, output_dir, *, seed=None, device="cpu", skip=(), test_size=0.20) -> TrainingResult`
 
-Train the cell-type classifier and subtree-labeling models on a
-labeled SWC dataset and write the resulting model files to
-`output_dir`. End users typically invoke this via `swcstudio train
-auto-typing` on the CLI; the Python function exists for scripted
-training pipelines.
+Runs the labeler's own trainer on a labeled SWC dataset (`pyramidal/`
+and `interneuron/` subfolders) and writes the four model files to
+`output_dir`, with `eval_split.json` and `train_manifest.json`. The
+result holds `output_dir`, `seed`, `model_paths`, `counts`,
+`timings_min`, and `skipped`. End users typically invoke this via
+`swcstudio train auto-typing` on the CLI; the Python function exists
+for scripted training pipelines.
 
 #### `validation_index_clean_text(swc_text, *, config_overrides=None) -> dict`
 
@@ -335,6 +393,7 @@ These are callable if you want per-feature direct imports.
   - `auto_fix_file(...)`
 - `swcstudio.tools.validation.features.auto_typing`
   - `run_file(...)`
+  - `auto_label_file(...)`
 - `swcstudio.tools.validation.features.radii_cleaning`
   - `clean_path(...)`
   - `clean_file(...)`

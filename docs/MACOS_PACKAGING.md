@@ -32,5 +32,10 @@ The result is `dist/SWC-Studio.app`. Application code is staged under
 `Contents/Resources/app/swcstudio`, and models are staged under
 `Contents/Resources/models`.
 
-Build on macOS for macOS. The current bundle is unsigned, so first launch
-may require right-clicking the app and choosing **Open**.
+Build on macOS for macOS. The bundle has only an ad-hoc signature, so
+Gatekeeper blocks its first launch. Users allow it in System Settings →
+Privacy & Security → **Open Anyway** (macOS 15 no longer offers
+Control-click → Open), or run `xattr -cr` on the app; see
+[First launch on macOS](GETTING_STARTED.md#first-launch-on-macos). The
+release workflow builds on `macos-latest`, an Apple silicon runner, so the
+bundle is arm64 only.

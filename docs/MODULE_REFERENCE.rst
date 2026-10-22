@@ -39,7 +39,7 @@ Core Modules
 .. automodule:: swcstudio.core.auto_typing.config
    :members:
 
-.. automodule:: swcstudio.core.auto_typing.pipeline
+.. automodule:: swcstudio.core.auto_typing.cell_class
    :members:
 
 .. automodule:: swcstudio.core.auto_typing_train
@@ -47,6 +47,12 @@ Core Modules
 
 .. automodule:: swcstudio.core.model_paths
    :members:
+
+The auto-typing engine runs the SWC auto-labeler, whose code is copied
+into ``swcstudio.core.labeler`` by ``scripts/sync_labeler.py``. That
+package is the labeler's own code and is not documented here; see the
+labeler repository (https://github.com/LazziLab/swc-autolabeler).
+SWC-Studio reaches it only through ``swcstudio.core.auto_typing``.
 
 Tool Feature Modules
 --------------------

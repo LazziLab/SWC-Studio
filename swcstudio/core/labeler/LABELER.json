@@ -1,0 +1,56 @@
+{
+  "name": "SWC auto-labeler",
+  "version": "1.0.1",
+  "source_repository": "https://github.com/LazziLab/swc-autolabeler",
+  "source_commit": "3a0f0833822f332667ea906808be47ca9706309b",
+  "source_model_set": "pipeline/models/seed123",
+  "models_dir": "labeler-1.0.1",
+  "models": {
+    "cell_type_classifier.pkl": {
+      "bytes": 1297496,
+      "sha256": "f80d6c2f3a0c29ee8f66379b68a3788b37b9fa53fa08ea650e95a8851486db78"
+    },
+    "branch_classifier.pkl": {
+      "bytes": 47449500,
+      "sha256": "8763b983212a12ef1045262894c5fa917e20292d9553e90681dfc0e66ebee51f"
+    },
+    "branch_correction.joblib": {
+      "bytes": 1177678,
+      "sha256": "3407376183599f7cedd17fefe83b3476cc5607afe55ba4d0bd7ea73b8fcb5c48"
+    },
+    "flag_model.joblib": {
+      "bytes": 447904,
+      "sha256": "d0789df28710b5cf7d867003a23b521069bcbc1e8ab22792b67cbc09254e038a"
+    }
+  },
+  "modules": [
+    "__init__.py",
+    "_model_cache.py",
+    "_xgb_classifiers.py",
+    "branch_features.py",
+    "features.py",
+    "infer_pipeline.py",
+    "qc.py",
+    "released_models.py",
+    "split.py",
+    "stage1/__init__.py",
+    "stage1/cell_type_detector.py",
+    "stage1/train.py",
+    "stage2/__init__.py",
+    "stage2/owner_features.py",
+    "stage2/subtree_features.py",
+    "stage2/train_stage2.py",
+    "stage3/__init__.py",
+    "stage3/branch_correction.py",
+    "stage3/refine.py",
+    "stage3/train_branch_correction.py",
+    "stage4/__init__.py",
+    "stage4/flag_features.py",
+    "stage4/flag_geom_features.py",
+    "stage4/flag_metrics.py",
+    "stage4/flag_model.py",
+    "stage4/single_seed_flag.py",
+    "swc_normalize.py",
+    "train_pipeline.py"
+  ]
+}

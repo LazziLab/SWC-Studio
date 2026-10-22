@@ -1,6 +1,6 @@
 """Crash-isolated process entry point for GUI type-suspicion inference.
 
-On macOS, PyTorch, scikit-learn, and XGBoost wheels can each load a
+On macOS, scikit-learn and XGBoost wheels can each load a
 different OpenMP runtime. Loading the XGBoost model after the full Qt GUI
 stack is resident has caused native ``libomp`` segmentation faults. A
 separate process keeps that native failure outside the GUI and gives the

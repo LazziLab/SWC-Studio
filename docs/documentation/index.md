@@ -19,10 +19,10 @@ reports-and-outputs
 If you are new to the project, read these pages first:
 
 - [Setup](setup.md)
-- [GPU Setup](../GPU_INSTALL.md)
 - [Workflows](workflows.md)
 - [Validation and Repair](validation-and-repair.md)
-- [Auto-Typing Engine](auto-typing-backends.md)
+- [Auto-Typing Engine](auto-typing-backends.md), including
+  [Reviewing Flagged Cells](auto-typing-backends.md#reviewing-flagged-cells)
 
 ## What the User Guide Covers
 
@@ -31,6 +31,7 @@ The guide is organized around the main user-facing behavior of the application:
 - how files are loaded and inspected
 - how the issue-driven workflow works
 - how validation findings become repair suggestions
+- how auto-labeling works and how flagged cells are reviewed
 - how custom labels persist across sessions
 - where outputs, history archives, and reports are written
 

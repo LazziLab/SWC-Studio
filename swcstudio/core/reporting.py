@@ -23,6 +23,8 @@ def _status_tag(status: str) -> str:
     s = str(status or "").lower()
     if s == "pass":
         return "PASS"
+    if s == "info":
+        return "INFO"
     if s == "warning":
         return "WARN"
     return "FAIL"
@@ -252,6 +254,7 @@ def format_validation_results_text(report: dict[str, Any]) -> str:
     lines.append(
         f"total={summary.get('total', 0)} "
         f"pass={summary.get('pass', 0)} "
+        f"info={summary.get('info', 0)} "
         f"warning={summary.get('warning', 0)} "
         f"fail={summary.get('fail', 0)}"
     )
@@ -263,7 +266,7 @@ def format_validation_results_text(report: dict[str, Any]) -> str:
             lines.append(f"- [{_status_tag(str(row.get('status', '')))}] {label}")
         lines.append("")
 
-    details = [r for r in report.get("results", []) if r.get("status") in {"warning", "fail"}]
+    details = [r for r in report.get("results", []) if r.get("status") in {"info", "warning", "fail"}]
     if details:
         lines.append("")
         lines.append("Detailed Findings")
@@ -301,6 +304,7 @@ def format_batch_validation_report_text(batch_report: dict[str, Any]) -> str:
     lines.append(
         f"Checks: total={totals.get('total', 0)} "
         f"pass={totals.get('pass', 0)} "
+        f"info={totals.get('info', 0)} "
         f"warning={totals.get('warning', 0)} "
         f"fail={totals.get('fail', 0)}"
     )
@@ -409,8 +413,8 @@ def format_radii_cleaning_report_text(payload: dict[str, Any]) -> str:
 
 def format_auto_typing_report_text(payload: dict[str, Any]) -> str:
     lines: list[str] = []
-    lines.append("Rule-Based Auto-Typing Batch Report")
-    lines.append("-----------------------------------")
+    lines.append("Auto-Labeling Report")
+    lines.append("--------------------")
     lines.append(f"Generated: {_now()}")
     lines.append(f"Folder: {payload.get('folder', '')}")
     lines.append(f"Output folder: {payload.get('out_dir', '')}")

@@ -36,7 +36,7 @@ The shared issue builder can combine:
 - direct validation findings
 - blocked checks
 - suspicious radii detected from the radii-cleaning backend
-- likely wrong labels inferred by comparing current labels against the auto-labeling backend
+- likely wrong labels, found by comparing the current labels with the labels the SWC auto-labeler gives
 - a simplification suggestion
 
 This is why the issue list is useful as a repair queue rather than only as a check summary.
@@ -58,7 +58,8 @@ For structural and ordering issues:
 For annotation problems:
 
 - use `Manual Label Editing` for targeted node changes
-- use `Auto Label Editing` to run the auto-typing engine for type reassignment
+- use `Auto Label Editing` to relabel the whole cell with the SWC auto-labeler
+- for a folder, run `Batch Processing -> Auto Label Editing` and review the flagged cells in the Flag Review window (see [Reviewing Flagged Cells](auto-typing-backends.md#reviewing-flagged-cells))
 - use dendrogram subtree reassignment when a whole branch should inherit a new label
 
 ### Radii repair
@@ -90,8 +91,9 @@ The intended loop is:
 6. review the new per-file history operation and any requested report
 
 Type-suspicion analysis normally runs in a background worker so the
-rest of the issue list can appear first. If validation immediately
-follows an applied auto-label result, the GUI reuses that result instead
-of running the same inference again.
+rest of the issue list can appear first. It compares labels only and
+does not score the quality flag. If validation immediately follows an
+applied auto-label result, the GUI reuses that result instead of
+running the same labeling again.
 
 This is the same logic described in the GUI workflow and reflected by the CLI command set.

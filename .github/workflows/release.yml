@@ -62,6 +62,14 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
+      # A tag must point at a commit already bumped to its version
+      # (pyproject.toml, updater.py, CITATION.cff); see RELEASE.md step 1.
+      # Manual dry runs take any version, so they skip this.
+      - name: Check the committed version matches the tag
+        if: github.event_name == 'push'
+        run: |
+          python scripts/stamp_version.py --version "${{ steps.version.outputs.version_no_v }}" --check
+
       - name: Stamp version into source tree (build-only, not committed)
         run: |
           python scripts/stamp_version.py --version "${{ steps.version.outputs.version_no_v }}"
@@ -104,10 +112,11 @@ jobs:
           STAGE="staging-models"
           rm -rf "$STAGE"
           mkdir -p "$STAGE"
-          if compgen -G 'swcstudio/data/models/*' > /dev/null; then
-            cp swcstudio/data/models/* "$STAGE/"
+          # One folder per labeler version (labeler-<version>/), kept as a folder.
+          if compgen -G 'swcstudio/data/models/labeler-*' > /dev/null; then
+            cp -R swcstudio/data/models/. "$STAGE/"
           else
-            echo "::error::no model files at swcstudio/data/models/"
+            echo "::error::no labeler model folder at swcstudio/data/models/"
             exit 1
           fi
           echo "$VERSION" > "$STAGE/VERSION"
@@ -231,6 +240,14 @@ jobs:
           draft: true
           files: artifacts/SWC-Studio-${{ steps.version.outputs.tag }}-macOS.zip
 
+      - name: Keep the macOS app as a run artifact (dry run)
+        uses: actions/upload-artifact@v4
+        if: github.event.inputs.dry_run == 'true'
+        with:
+          name: SWC-Studio-${{ steps.version.outputs.tag }}-macOS
+          path: artifacts/SWC-Studio-${{ steps.version.outputs.tag }}-macOS.zip
+          retention-days: 7
+
 
   # =========================================================================
   # 3. Windows modular .zip.
@@ -303,6 +320,14 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           draft: true
           files: artifacts/SWC-Studio-${{ steps.version.outputs.tag }}-Windows.zip
+
+      - name: Keep the Windows app as a run artifact (dry run)
+        uses: actions/upload-artifact@v4
+        if: github.event.inputs.dry_run == 'true'
+        with:
+          name: SWC-Studio-${{ steps.version.outputs.tag }}-Windows
+          path: artifacts/SWC-Studio-${{ steps.version.outputs.tag }}-Windows.zip
+          retention-days: 7
 
 
   # =========================================================================

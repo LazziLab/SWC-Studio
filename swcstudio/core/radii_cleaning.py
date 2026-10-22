@@ -28,30 +28,39 @@ TYPE_ALIASES: dict[int, set[str]] = {
 DEFAULT_RULES: dict[str, Any] = {
     "preserve_soma": True,
     "small_radius_zero_only": True,
+    # Plausible radius range (um) per node type. Fixed ranges, unlike
+    # percentiles of the file's own radii, still hold when most of a file's
+    # radii are wrong. A radius above the maximum is always flagged; one
+    # below the minimum only when small_radius_zero_only is off, because
+    # tiny values such as 0.004 are common placeholders for "unknown".
+    # Only radii inside the range serve as reference or replacement values.
     "sanity_bounds": {
-        "global": {
-            "lower_percentile": 1.0,
-            "upper_percentile": 99.5,
-            "lower_abs": 0.05,
-            "upper_abs": 30.0,
-        },
+        "default": {"min_radius": 0.05, "max_radius": 10.0},
         "per_type": {
-            "2": {"enabled": True, "lower_percentile": 1.0, "upper_percentile": 99.5, "lower_abs": 0.05, "upper_abs": 30.0},
-            "3": {"enabled": True, "lower_percentile": 1.0, "upper_percentile": 99.5, "lower_abs": 0.05, "upper_abs": 30.0},
-            "4": {"enabled": True, "lower_percentile": 1.0, "upper_percentile": 99.5, "lower_abs": 0.05, "upper_abs": 30.0},
+            "2": {"enabled": True, "min_radius": 0.05, "max_radius": 5.0},
+            "3": {"enabled": True, "min_radius": 0.05, "max_radius": 8.0},
+            "4": {"enabled": True, "min_radius": 0.05, "max_radius": 10.0},
         },
     },
+    # Only a radius more than max_ratio times thicker or thinner than the
+    # median of its plausible neighbours (both sides) counts as an outlier.
     "local_outlier": {
         "enabled": True,
         "window_nodes": 5,
-        "max_percent_deviation": 0.5,
+        "max_ratio": 3.0,
     },
+    # Cap each dendrite node at its parent's radius x (1 + slack). Off by
+    # default: real dendrites do not taper monotonically, so the cap changed
+    # correct radii, and one thin node thinned everything distal to it.
     "taper": {
-        "enabled": True,
+        "enabled": False,
         "slack": 0.05,
     },
+    # Raise axon radii below min_radius. Off by default: the axon's plausible
+    # range already sets its minimum, and many real axons are thinner than
+    # 0.12 um, so a floor changed most nodes of otherwise clean cells.
     "axon_floor": {
-        "enabled": True,
+        "enabled": False,
         "min_radius": 0.12,
     },
     "savgol": {
@@ -74,6 +83,17 @@ DEFAULT_RULES: dict[str, Any] = {
 
 def _is_valid_radius(v: float) -> bool:
     return isinstance(v, (int, float, np.floating)) and math.isfinite(float(v)) and float(v) > 0.0
+
+
+def _plausible(v: float, lo: float, hi: float) -> bool:
+    return _is_valid_radius(v) and lo <= float(v) <= hi
+
+
+def _same_radius(old: float, new: float, tol: float) -> bool:
+    # NaN != NaN and inf - inf is NaN, so compare those before subtracting.
+    if math.isnan(old) and math.isnan(new):
+        return True
+    return old == new or abs(old - new) <= tol
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -151,20 +171,22 @@ def _resolve_type_thresholds(cfg: dict[str, Any]) -> dict[int, dict[str, Any]]:
     return out
 
 
-def _resolve_global_sanity_bounds(cfg: dict[str, Any]) -> dict[str, float]:
-    sanity_bounds = cfg.get("sanity_bounds", {})
-    global_cfg = {}
-    if isinstance(sanity_bounds, dict):
-        global_cfg = sanity_bounds.get("global", {})
-    global_cfg = dict(global_cfg) if isinstance(global_cfg, dict) else {}
+def _resolve_default_bounds(cfg: dict[str, Any]) -> dict[str, float]:
+    """The plausible range for types without their own entry.
 
-    legacy_pct = dict(cfg.get("global_percentile_bounds", {}))
+    Configs written before fixed ranges used ``global.lower_abs`` and
+    ``global.upper_abs``; those still count as the range's ends.
+    """
+    sanity_bounds = cfg.get("sanity_bounds", {})
+    sanity_bounds = sanity_bounds if isinstance(sanity_bounds, dict) else {}
+    default_cfg = sanity_bounds.get("default", {})
+    default_cfg = dict(default_cfg) if isinstance(default_cfg, dict) else {}
+    legacy = sanity_bounds.get("global", {})
+    legacy = dict(legacy) if isinstance(legacy, dict) else {}
     legacy_abs = dict(cfg.get("global_absolute_bounds", {}))
     return {
-        "lower_percentile": float(global_cfg.get("lower_percentile", legacy_pct.get("min", 1.0))),
-        "upper_percentile": float(global_cfg.get("upper_percentile", legacy_pct.get("max", 99.5))),
-        "lower_abs": float(global_cfg.get("lower_abs", legacy_abs.get("min", 0.05))),
-        "upper_abs": float(global_cfg.get("upper_abs", legacy_abs.get("max", 30.0))),
+        "min_radius": float(legacy.get("lower_abs", legacy_abs.get("min", default_cfg.get("min_radius", 0.05)))),
+        "max_radius": float(legacy.get("upper_abs", legacy_abs.get("max", default_cfg.get("max_radius", 10.0)))),
     }
 
 
@@ -332,12 +354,11 @@ def radii_stats_by_type(df: pd.DataFrame, *, bins: int = 12) -> dict[str, Any]:
 
 
 def _compute_type_bounds(
-    radii: np.ndarray,
     types: np.ndarray,
     cfg: dict[str, Any],
 ) -> dict[int, tuple[bool, float, float]]:
-    global_bounds = _resolve_global_sanity_bounds(cfg)
-    zero_only_small = bool(cfg.get("small_radius_zero_only", True))
+    """``(enabled, min, max)`` plausible radius per node type in the file."""
+    default = _resolve_default_bounds(cfg)
     preserve_soma = bool(cfg.get("preserve_soma", True))
     per_type_cfg = _resolve_type_thresholds(cfg)
 
@@ -348,39 +369,47 @@ def _compute_type_bounds(
             continue
         t_cfg = dict(per_type_cfg.get(int(t), {}))
         enabled = bool(t_cfg.get("enabled", True))
-        lower_pct = float(t_cfg.get("lower_percentile", t_cfg.get("min_percentile", global_bounds["lower_percentile"])))
-        upper_pct = float(t_cfg.get("upper_percentile", t_cfg.get("max_percentile", global_bounds["upper_percentile"])))
-        lower_abs = float(t_cfg.get("lower_abs", t_cfg.get("min_abs", global_bounds["lower_abs"])))
-        upper_abs = float(t_cfg.get("upper_abs", t_cfg.get("max_abs", global_bounds["upper_abs"])))
-
-        vals = radii[(types == int(t)) & np.isfinite(radii) & (radii > 0.0)]
-        if vals.size > 0:
-            pct_lo = float(np.percentile(vals, lower_pct))
-            pct_hi = float(np.percentile(vals, upper_pct))
-            lo = max(lower_abs, pct_lo)
-            hi = min(upper_abs, pct_hi)
-        else:
-            lo = lower_abs
-            hi = upper_abs
-        if zero_only_small:
-            lo = 0.0
+        # min_radius/max_radius. Configs from before fixed ranges said
+        # lower_abs/upper_abs; the defaults never set those, so when present
+        # they are the user's choice and win over the default range.
+        lo = float(t_cfg.get("lower_abs", t_cfg.get("min_abs", t_cfg.get("min_radius", default["min_radius"]))))
+        hi = float(t_cfg.get("upper_abs", t_cfg.get("max_abs", t_cfg.get("max_radius", default["max_radius"]))))
         if hi < lo:
             lo, hi = hi, lo
-        bounds[t] = (enabled, float(lo), float(hi))
+        bounds[t] = (enabled, lo, hi)
     return bounds
 
 
-def _nearest_valid_parent(i: int, parent_idx: np.ndarray, radii: np.ndarray) -> float | None:
+def _type_range(t: int, bounds: dict[int, tuple[bool, float, float]]) -> tuple[float, float]:
+    _enabled, lo, hi = bounds.get(int(t), (True, 0.0, float("inf")))
+    return float(lo), float(hi)
+
+
+def _nearest_valid_parent(
+    i: int,
+    parent_idx: np.ndarray,
+    radii: np.ndarray,
+    lo: float = 0.0,
+    hi: float = float("inf"),
+) -> float | None:
     p = int(parent_idx[i])
     while p >= 0:
         val = float(radii[p])
-        if _is_valid_radius(val):
+        if _plausible(val, lo, hi):
             return val
         p = int(parent_idx[p])
     return None
 
 
-def _nearest_valid_children(i: int, children: list[list[int]], radii: np.ndarray, *, max_depth: int = 6) -> list[float]:
+def _nearest_valid_children(
+    i: int,
+    children: list[list[int]],
+    radii: np.ndarray,
+    *,
+    max_depth: int = 6,
+    lo: float = 0.0,
+    hi: float = float("inf"),
+) -> list[float]:
     out: list[float] = []
     queue: list[tuple[int, int]] = [(child, 1) for child in children[i]]
     best_depth = 0
@@ -389,7 +418,7 @@ def _nearest_valid_children(i: int, children: list[list[int]], radii: np.ndarray
         if depth > max_depth:
             continue
         val = float(radii[idx])
-        if _is_valid_radius(val):
+        if _plausible(val, lo, hi):
             out.append(val)
             best_depth = depth
             continue
@@ -410,12 +439,14 @@ def _fallback_radius(
     global_median: float,
     clamp_min: float,
     clamp_max: float,
+    lo: float = 0.0,
+    hi: float = float("inf"),
 ) -> float:
     vals: list[float] = []
-    parent_val = _nearest_valid_parent(i, parent_idx, radii)
+    parent_val = _nearest_valid_parent(i, parent_idx, radii, lo, hi)
     if parent_val is not None:
         vals.append(parent_val)
-    child_vals = _nearest_valid_children(i, children, radii)
+    child_vals = _nearest_valid_children(i, children, radii, lo=lo, hi=hi)
     if child_vals:
         vals.append(float(np.mean(child_vals)))
     if vals:
@@ -473,22 +504,24 @@ def _local_median_pass(
     if window_nodes % 2 == 0:
         window_nodes += 1
     half = window_nodes // 2
-    max_percent_deviation = float(local_cfg.get("max_percent_deviation", 0.5))
+    # A radius this many times thicker or thinner than its neighbours is an
+    # outlier. On expert-traced cells 99% of radii lie within x1.9 of their
+    # neighbours and 0.5% beyond x3, so x3 flags errors, not natural variation.
+    max_ratio = max(1.0, float(local_cfg.get("max_ratio", 3.0)))
 
+    # Single-node paths too: they have no window, but the range check and
+    # the non-positive repair still apply.
     for path in paths:
-        if len(path) <= 1:
-            continue
         for j, idx in enumerate(path):
             if preserve_soma and int(types[idx]) == 1:
                 continue
             cur = float(radii[idx])
-            left_nodes = path[max(0, j - half) : j]
-            right_nodes = path[j + 1 : min(len(path), j + half + 1)]
-            win_vals = [
-                float(radii[n])
-                for n in (left_nodes + right_nodes)
-                if _is_valid_radius(float(radii[n]))
-            ]
+            plo, phi = _type_range(int(types[idx]), bounds)
+            left_vals = [float(radii[n]) for n in path[max(0, j - half) : j]
+                         if _plausible(float(radii[n]), plo, phi)]
+            right_vals = [float(radii[n]) for n in path[j + 1 : min(len(path), j + half + 1)]
+                          if _plausible(float(radii[n]), plo, phi)]
+            win_vals = left_vals + right_vals
             local_median = _small_median(win_vals)
 
             flagged: list[str] = []
@@ -496,10 +529,11 @@ def _local_median_pass(
                 flagged.append("non_finite")
             elif cur <= 0.0:
                 flagged.append("non_positive")
-            elif local_median is not None and left_nodes and right_nodes and len(win_vals) >= 3:
-                denom = max(local_median, 1e-9)
-                deviation = abs(cur - local_median) / denom
-                if deviation > max_percent_deviation:
+            elif local_median is not None and left_vals and right_vals:
+                # Judged against plausible neighbours on both sides, so the end
+                # of a path or one bad neighbour cannot make a node look wrong.
+                ratio = cur / max(local_median, 1e-9)
+                if ratio > max_ratio or ratio < 1.0 / max_ratio:
                     flagged.append("local_outlier")
 
             enabled, lo, hi = bounds.get(int(types[idx]), (True, 0.0, float("inf")))
@@ -524,6 +558,8 @@ def _local_median_pass(
                     global_median,
                     clamp_min,
                     clamp_max,
+                    plo,
+                    phi,
                 )
             replacement = _apply_bounds(
                 replacement,
@@ -550,7 +586,11 @@ def _taper_pass(
     reason_name: str = "taper_cap",
 ) -> None:
     taper_cfg = dict(cfg.get("taper", {}))
-    if not bool(taper_cfg.get("enabled", True)):
+    use_taper = bool(taper_cfg.get("enabled", False))
+    axon_floor_cfg = dict(cfg.get("axon_floor", {}))
+    use_axon_floor = bool(axon_floor_cfg.get("enabled", False))
+    axon_floor = float(axon_floor_cfg.get("min_radius", 0.12))
+    if not (use_taper or use_axon_floor):
         return
 
     preserve_soma = bool(cfg.get("preserve_soma", True))
@@ -559,10 +599,6 @@ def _taper_pass(
     clamp_min = float(replacement_cfg.get("clamp_min", 0.05))
     clamp_max = float(replacement_cfg.get("clamp_max", 30.0))
     slack = max(0.0, float(taper_cfg.get("slack", 0.05)))
-
-    axon_floor_cfg = dict(cfg.get("axon_floor", {}))
-    use_axon_floor = bool(axon_floor_cfg.get("enabled", True))
-    axon_floor = float(axon_floor_cfg.get("min_radius", 0.12))
 
     for path in paths:
         if len(path) <= 1:
@@ -574,10 +610,15 @@ def _taper_pass(
                 continue
             cur = float(radii[idx])
             prev_radius = float(radii[prev])
-            if not _is_valid_radius(cur):
-                cur = clamp_min
             changed = False
-            if int(types[idx]) != 2 and _is_valid_radius(prev_radius):
+            if not _is_valid_radius(cur):
+                _record_reason(reasons_by_idx, idx, "non_positive" if math.isfinite(cur) else "non_finite")
+                cur = clamp_min
+                changed = True
+            plo, phi = _type_range(int(types[idx]), bounds)
+            # A placeholder (e.g. 0.004) or implausibly thick parent says
+            # nothing about how thick its child may be.
+            if use_taper and int(types[idx]) != 2 and _plausible(prev_radius, plo, phi):
                 max_allowed = prev_radius * (1.0 + slack)
                 if cur > max_allowed:
                     cur = max_allowed
@@ -587,16 +628,17 @@ def _taper_pass(
                 cur = axon_floor
                 changed = True
                 _record_reason(reasons_by_idx, idx, "axon_floor")
-            cur = _apply_bounds(
-                cur,
-                int(types[idx]),
-                bounds,
-                zero_only_small=zero_only_small,
-                clamp_min=clamp_min,
-                clamp_max=clamp_max,
-            )
-            if float(cur) != float(radii[idx]) or changed:
-                radii[idx] = float(cur)
+            # Only a value this pass changed is bounded; clamping every node
+            # would silently raise small radii (e.g. 0.035) to clamp_min.
+            if changed:
+                radii[idx] = float(_apply_bounds(
+                    cur,
+                    int(types[idx]),
+                    bounds,
+                    zero_only_small=zero_only_small,
+                    clamp_min=clamp_min,
+                    clamp_max=clamp_max,
+                ))
 
 
 def _weighted_poly_smooth(x: np.ndarray, y: np.ndarray, center_x: float, polyorder: int, sigma_fraction: float) -> float:
@@ -642,7 +684,7 @@ def _savgol_pass(
     sigma_fraction = float(smooth_cfg.get("gaussian_sigma_fraction", 0.5))
 
     axon_floor_cfg = dict(cfg.get("axon_floor", {}))
-    use_axon_floor = bool(axon_floor_cfg.get("enabled", True))
+    use_axon_floor = bool(axon_floor_cfg.get("enabled", False))
     axon_floor = float(axon_floor_cfg.get("min_radius", 0.12))
 
     updated = np.array(radii, dtype=float, copy=True)
@@ -663,8 +705,12 @@ def _savgol_pass(
             win_nodes = path[lo:hi]
             if len(win_nodes) <= polyorder:
                 continue
-            win_x = dist[lo:hi]
-            win_y = np.asarray([float(radii[n]) for n in win_nodes], dtype=float)
+            plo, phi = _type_range(int(types[idx]), bounds)
+            keep = [k for k, n in enumerate(win_nodes) if _plausible(float(radii[n]), plo, phi)]
+            if len(keep) <= polyorder:
+                continue
+            win_x = dist[lo:hi][keep]
+            win_y = np.asarray([float(radii[win_nodes[k]]) for k in keep], dtype=float)
             new_radius = _weighted_poly_smooth(
                 win_x,
                 win_y,
@@ -731,18 +777,28 @@ def _clean_radii_single_pass(
     radii = np.array(out["radius"], dtype=float, copy=True)
     original = np.array(radii, dtype=float, copy=True)
 
-    bounds = _compute_type_bounds(radii, types, cfg)
+    bounds = _compute_type_bounds(types, cfg)
     replacement_cfg = dict(cfg.get("replacement", {}))
     clamp_min = float(replacement_cfg.get("clamp_min", 0.05))
     clamp_max = float(replacement_cfg.get("clamp_max", 30.0))
 
-    valid_global = radii[np.isfinite(radii) & (radii > 0.0)]
-    global_median = float(np.median(valid_global)) if valid_global.size else max(0.05, clamp_min)
+    # Fallback values come from plausible radii only; a type with none gets
+    # its own median pulled into its range.
+    plausible_mask = np.zeros(len(radii), dtype=bool)
     type_medians: dict[int, float] = {}
     for t in sorted({int(v) for v in types.tolist()}):
-        vals = radii[(types == int(t)) & np.isfinite(radii) & (radii > 0.0)]
-        if vals.size > 0:
-            type_medians[int(t)] = float(np.median(vals))
+        plo, phi = _type_range(int(t), bounds)
+        of_type = types == int(t)
+        ok = of_type & np.isfinite(radii) & (radii >= plo) & (radii <= phi) & (radii > 0.0)
+        plausible_mask |= ok
+        if ok.any():
+            type_medians[int(t)] = float(np.median(radii[ok]))
+        else:
+            valid = radii[of_type & np.isfinite(radii) & (radii > 0.0)]
+            if valid.size:
+                type_medians[int(t)] = _clamp(float(np.median(valid)), max(plo, clamp_min), min(phi, clamp_max))
+    plausible_all = radii[plausible_mask]
+    global_median = float(np.median(plausible_all)) if plausible_all.size else max(0.05, clamp_min)
 
     reasons_by_idx: dict[int, set[str]] = {}
 
@@ -773,7 +829,7 @@ def _clean_radii_single_pass(
     for i in range(len(radii)):
         old_r = float(original[i])
         new_r = float(radii[i])
-        if abs(old_r - new_r) <= 1e-12:
+        if _same_radius(old_r, new_r, 1e-12):
             continue
         change_details.append(
             {
@@ -860,7 +916,7 @@ def clean_radii_dataframe(df: pd.DataFrame, *, rules: dict[str, Any] | None = No
     for node_id in sorted(set(old_lookup).intersection(new_lookup)):
         old_radius = float(old_lookup[node_id])
         new_radius = float(new_lookup[node_id])
-        if abs(old_radius - new_radius) <= max(1e-12, min_effective_delta):
+        if _same_radius(old_radius, new_radius, max(1e-12, min_effective_delta)):
             continue
         change_details.append(
             {

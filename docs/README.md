@@ -34,6 +34,8 @@ The `User Guide` section is organized around how the software is actually used:
   - GUI and CLI usage, issue-driven repair, tool routing
 - `Validation and Repair`
   - what creates issues, how repairs are suggested, where the check details live
+- `Auto-Typing Engine`
+  - the SWC auto-labeler's stages, model files, reviewing flagged cells, and training
 - `Custom Types and Labels`
   - persistent custom labels, dendrogram editing, saved metadata, history/report behavior
 - `Reports and Outputs`

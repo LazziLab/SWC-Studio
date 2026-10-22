@@ -43,7 +43,8 @@ class PackagingLayoutTests(unittest.TestCase):
             configs.mkdir(parents=True)
             runtime.mkdir()
             (package / "__init__.py").write_text("", encoding="utf-8")
-            (models / "qc_gate.pkl").write_bytes(b"model")
+            (models / "labeler-1.0.0").mkdir()
+            (models / "labeler-1.0.0" / "flag_model.joblib").write_bytes(b"model")
             (configs / "default.json").write_text("{}", encoding="utf-8")
 
             staging.stage_payload(source, runtime, "1.2.3")
@@ -52,10 +53,10 @@ class PackagingLayoutTests(unittest.TestCase):
                 (runtime / "app/swcstudio/tools/validation/configs/default.json").is_file()
             )
             self.assertFalse(
-                (runtime / "app/swcstudio/data/models/qc_gate.pkl").exists()
+                (runtime / "app/swcstudio/data/models/labeler-1.0.0/flag_model.joblib").exists()
             )
             self.assertEqual(
-                (runtime / "models/qc_gate.pkl").read_bytes(),
+                (runtime / "models/labeler-1.0.0/flag_model.joblib").read_bytes(),
                 b"model",
             )
             self.assertEqual(
@@ -76,6 +77,65 @@ class PackagingLayoutTests(unittest.TestCase):
             with mock.patch.object(bootstrap.sys, "_MEIPASS", str(runtime), create=True):
                 self.assertEqual(bootstrap._bundled_app_dir(), runtime / "app")
                 self.assertEqual(bootstrap._bundled_models_dir(), runtime / "models")
+
+    def test_bootstrap_skips_code_update_older_than_bundle(self) -> None:
+        bootstrap = _load_script(
+            "swcstudio_bootstrap_version_test",
+            "packaging/swcstudio_bootstrap.py",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            override = root / "override"
+            bundled = root / "runtime" / "app"
+            for app_dir, version in ((override, "0.2.0"), (bundled, "0.2.1")):
+                (app_dir / "swcstudio").mkdir(parents=True)
+                (app_dir / "swcstudio" / "__init__.py").write_text("", encoding="utf-8")
+                (app_dir / "VERSION").write_text(version + "\n", encoding="utf-8")
+
+            with mock.patch.object(bootstrap, "_user_app_override_dir", return_value=override), \
+                    mock.patch.object(bootstrap, "_bundled_app_dir", return_value=bundled):
+                self.assertEqual(bootstrap._find_app_dir(), bundled)
+                (override / "VERSION").write_text("0.3.0\n", encoding="utf-8")
+                self.assertEqual(bootstrap._find_app_dir(), override)
+                (override / "VERSION").unlink()
+                self.assertEqual(bootstrap._find_app_dir(), bundled)
+
+    def test_bootstrap_reads_bundled_version_from_updater_stamp(self) -> None:
+        bootstrap = _load_script(
+            "swcstudio_bootstrap_stamp_test",
+            "packaging/swcstudio_bootstrap.py",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            bundled = Path(tmp) / "app"
+            (bundled / "swcstudio" / "core").mkdir(parents=True)
+            (bundled / "swcstudio" / "core" / "updater.py").write_text(
+                'BUNDLED_APP_VERSION    = "0.2.1"\n', encoding="utf-8"
+            )
+            self.assertEqual(bootstrap._code_version(bundled), (0, 2, 1))
+
+    def test_package_version_comes_from_the_loaded_code_layer(self) -> None:
+        import swcstudio
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = Path(tmp) / "app"
+            (app / "swcstudio").mkdir(parents=True)
+            (app / "VERSION").write_text("9.9.9\n", encoding="utf-8")
+            package_dir = str(app / "swcstudio")
+            with mock.patch.dict(os.environ, {"SWCSTUDIO_BUNDLE_FLAVOR": "modular"}):
+                self.assertEqual(swcstudio._code_layer_version(package_dir), "9.9.9")
+            with mock.patch.dict(os.environ, {"SWCSTUDIO_BUNDLE_FLAVOR": ""}):
+                self.assertIsNone(swcstudio._code_layer_version(package_dir))
+
+    def test_current_app_version_ignores_older_code_update(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            override = Path(tmp)
+            with mock.patch.object(updater, "user_app_override_dir", return_value=override), \
+                    mock.patch.object(updater, "app_updates_supported", return_value=True), \
+                    mock.patch.object(updater, "BUNDLED_APP_VERSION", "0.2.1"):
+                (override / "VERSION").write_text("0.2.0\n", encoding="utf-8")
+                self.assertEqual(updater.current_app_version(), "0.2.1")
+                (override / "VERSION").write_text("0.2.2\n", encoding="utf-8")
+                self.assertEqual(updater.current_app_version(), "0.2.2")
 
     def test_bootstrap_finds_macos_contents_resources_layout(self) -> None:
         bootstrap = _load_script(
@@ -148,19 +208,21 @@ class PackagingLayoutTests(unittest.TestCase):
 
     def test_model_search_uses_bootstrap_model_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            bundled = Path(tmp)
-            model = bundled / "bootstrap_test_model.bin"
-            model.write_bytes(b"model")
+            bundled = Path(tmp) / "bundled"
+            folder = bundled / model_paths.labeler_models_dirname()
+            folder.mkdir(parents=True)
+            for fname in model_paths.MODEL_FILES.values():
+                (folder / fname).write_bytes(b"model")
+            user = Path(tmp) / "user"
+            user.mkdir()
             with mock.patch.dict(
                 os.environ,
                 {model_paths.BUNDLED_ENV_VAR: str(bundled)},
                 clear=False,
-            ):
-                found = model_paths.resolve_model_path(
-                    "bootstrap_test_model.bin",
-                    auto_download=False,
-                )
-            self.assertEqual(found, model)
+            ), mock.patch.object(model_paths, "user_model_dir", return_value=user):
+                os.environ.pop(model_paths.ENV_VAR, None)
+                found = model_paths.resolve_model_dir(auto_download=False)
+            self.assertEqual(found, folder)
 
     def test_app_updates_are_only_offered_to_modular_bundles(self) -> None:
         manifest = updater.UpdateManifest(

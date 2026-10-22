@@ -99,9 +99,19 @@ _SWCTYPE = np.dtype([
 ])
 
 
+def _swc_rows_only(swc_text: str) -> str:
+    """The lines that are SWC rows: seven or more values once any ``#`` comment is cut.
+
+    Other lines are skipped, as ``swc_io.parse_swc_text_preserve_tokens`` skips
+    them, so a stray header line (Vaa3D writes ``autoset #bkg_thresh = 1``) does
+    not set the column count for the whole file.
+    """
+    return "\n".join(line for line in swc_text.splitlines() if len(line.split("#", 1)[0].split()) >= 7)
+
+
 def _load_swc_to_array(swc_text: str) -> np.ndarray:
-    """Fast parser using NumPy; ignores lines starting with '#'."""
-    buf = io.StringIO(swc_text)
+    """Fast parser using NumPy; reads only the lines that are SWC rows."""
+    buf = io.StringIO(_swc_rows_only(swc_text))
     arr = np.genfromtxt(
         buf,
         comments="#",
@@ -109,6 +119,8 @@ def _load_swc_to_array(swc_text: str) -> np.ndarray:
         invalid_raise=False,
         autostrip=True
     )
+    if arr.size == 0:
+        return np.array([], dtype=_SWCTYPE)
     if arr.ndim == 0:  # single-line files
         arr = arr.reshape(1)
     return arr

@@ -82,7 +82,7 @@ class ProvenanceArchiveTests(unittest.TestCase):
             {
                 "options": {
                     "cell_type": "pyramidal",
-                    "flag_strictness": 0.8,
+                    "flag_budget": 0.2,
                     "flag_enabled": True,
                 },
                 "effective_config": {
@@ -101,8 +101,8 @@ class ProvenanceArchiveTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(displayed["Cell Type"], "pyramidal")
-        self.assertEqual(displayed["Flag Strictness"], "0.8")
+        self.assertEqual(displayed["Cell Class"], "pyramidal")
+        self.assertEqual(displayed["Flag Review Budget"], "0.2")
         self.assertEqual(displayed["Flagging Enabled"], "Yes")
         self.assertEqual(displayed["Confidence Threshold"], "0.6")
         self.assertEqual(displayed["AI Seed"], 123)
@@ -304,13 +304,53 @@ class ProvenanceArchiveTests(unittest.TestCase):
             op.set_output(TYPE_EDIT)
 
         renamed = self.tmp / "renamed.swc"
-        shutil.copy2(current_swc_path_for(swc), renamed)
+        current_swc_path_for(swc).rename(renamed)
         with tracked_op(renamed, kind=OpKind.SET_RADIUS, params={}, message="renamed") as op:
             op.set_output(RADIUS_EDIT)
 
         self.assertFalse(archive_path_for(swc).exists())
         self.assertTrue(archive_path_for(renamed).exists())
         self.assertFalse(history_dir_for(renamed).exists())
+        with open_history_for_read(renamed, history_dir_for(renamed)) as hist:
+            messages = [event.message for event in iter_events(hist / "events.jsonl")]
+        self.assertEqual(messages, ["first", "renamed"])
+
+    def test_editing_a_copy_leaves_the_original_history_in_place(self) -> None:
+        swc = self._make_swc()
+        with tracked_op(swc, kind=OpKind.SET_TYPE, params={}, message="first") as op:
+            op.set_output(TYPE_EDIT)
+
+        copy = self.tmp / "copy.swc"
+        shutil.copy2(swc, copy)
+        with tracked_op(copy, kind=OpKind.SET_RADIUS, params={}, message="copy edit") as op:
+            op.set_output(RADIUS_EDIT)
+
+        self.assertTrue(archive_path_for(swc).exists())
+        self.assertTrue(archive_path_for(copy).exists())
+        with open_history_for_read(swc, history_dir_for(swc)) as hist:
+            original = [event.message for event in iter_events(hist / "events.jsonl")]
+        with open_history_for_read(copy, history_dir_for(copy)) as hist:
+            copied = [event.message for event in iter_events(hist / "events.jsonl")]
+        self.assertEqual(original, ["first"])
+        self.assertEqual(copied, ["first", "copy edit"])
+
+        with tracked_op(swc, kind=OpKind.SET_RADIUS, params={}, message="original edit") as op:
+            op.set_output(RADIUS_EDIT)
+        with open_history_for_read(swc, history_dir_for(swc)) as hist:
+            original = [event.message for event in iter_events(hist / "events.jsonl")]
+        self.assertEqual(original, ["first", "original edit"])
+
+    def test_case_only_rename_keeps_the_archive(self) -> None:
+        swc = self._make_swc()
+        with tracked_op(swc, kind=OpKind.SET_TYPE, params={}, message="first") as op:
+            op.set_output(TYPE_EDIT)
+
+        renamed = self.tmp / "CELL.swc"
+        swc.rename(renamed)
+        with tracked_op(renamed, kind=OpKind.SET_RADIUS, params={}, message="renamed") as op:
+            op.set_output(RADIUS_EDIT)
+
+        self.assertTrue(archive_path_for(renamed).exists())
         with open_history_for_read(renamed, history_dir_for(renamed)) as hist:
             messages = [event.message for event in iter_events(hist / "events.jsonl")]
         self.assertEqual(messages, ["first", "renamed"])

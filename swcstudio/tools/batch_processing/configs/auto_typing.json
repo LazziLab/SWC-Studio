@@ -2,10 +2,8 @@
   "enabled": true,
   "feature": "auto_typing",
   "flag_enabled": true,
-  "flag_strictness": 0.5,
-  "flag_feature_mode": "compact",
-  "cell_type": "unknown",
+  "flag_budget": 0.1,
+  "cell_type": "auto",
   "model_dir": "",
-  "use_subtree_stage2": true,
-  "notes": "Auto-typing uses the v12 QC-label-flag pipeline. cell_type may be unknown, pyramidal, or interneuron. flag_strictness is 0.0 loose to 1.0 strict."
+  "notes": "Auto-typing runs the SWC auto-labeler. cell_type is auto (Stage 1 decides), 3-class (axon, basal, apical) or 2-class (axon, dendrite). flag_budget is the share of each cell class a batch flags for review, riskiest first."
 }

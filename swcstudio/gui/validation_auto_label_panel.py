@@ -1,7 +1,8 @@
 """Validation control panel: single-file auto label editing applied in-place.
 
-The auto-labeling engine is the v12 QC-label-flag pipeline; the user can
-optionally override the model directory to point at custom-trained models.
+The panel runs the SWC auto-labeler on the current canvas. The user chooses the
+cell class (automatic, 3-class or 2-class), whether the quality flag runs, and
+optionally a model folder of custom-trained models.
 """
 
 from __future__ import annotations
@@ -14,28 +15,82 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
-    QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
-    QSlider,
     QVBoxLayout,
     QWidget,
 )
 
 from swcstudio.core.auto_typing import (
     BatchOptions,
-    backend_status,
+    cell_class_name,
     get_config as get_auto_typing_config,
     is_available,
     save_config as save_auto_typing_config,
 )
 from swcstudio.core.config import feature_config_path
+from swcstudio.core.model_paths import labeler_info
 
 _CFG_PATH = feature_config_path("batch_processing", "auto_typing")
+
+# (shown text, value passed to the engine)
+CELL_CLASS_CHOICES = (
+    ("Auto (Stage 1 decides)", "auto"),
+    ("3-class (axon, basal, apical)", "pyramidal"),
+    ("2-class (axon, dendrite)", "interneuron"),
+)
+
+FLAG_REASONS = {
+    "below_cutoff": "its predicted per-cell F1 is below the flag's cut-off",
+    "riskiest_share": "it is among the riskiest cells of its class in this batch",
+    "class_mismatch": "the chosen cell class differs from Stage 1's prediction",
+    "no_flag_model": "this model folder has no quality flag",
+    "no_flag_for_class": "this model folder has no quality flag for this cell class",
+}
+
+
+def add_cell_class_items(combo: QComboBox) -> None:
+    """Fill ``combo`` with the cell-class choices."""
+    for text, value in CELL_CLASS_CHOICES:
+        combo.addItem(text, value)
+    combo.setToolTip(
+        "Auto lets Stage 1 decide. A chosen class that Stage 1 disputes is still used,\n"
+        "and the cell is flagged as a class mismatch for review.")
+
+
+def select_cell_class(combo: QComboBox, value: str | None) -> None:
+    """Select the combo entry for a stored cell class (old names included)."""
+    v = str(value or "auto").strip().lower()
+    v = {"unknown": "auto", "3-class": "pyramidal", "2-class": "interneuron"}.get(v, v)
+    idx = combo.findData(v)
+    combo.setCurrentIndex(idx if idx >= 0 else 0)
+
+
+def flag_summary_lines(flag_result: dict, *, class_mismatch: bool = False,
+                       stage1_cell_type: str | None = None) -> list[str]:
+    """Human-readable lines for one file's quality-flag result."""
+    if not flag_result:
+        return ["Quality flag: off"]
+    lines = []
+    f1 = flag_result.get("predicted_f1")
+    if f1 is not None:
+        lines.append(f"Predicted per-cell F1: {float(f1):.3f}")
+    flagged = bool(flag_result.get("flagged", False))
+    reason = FLAG_REASONS.get(str(flag_result.get("reason") or ""), "")
+    if flagged:
+        lines.append("Quality flag: FLAGGED for review" + (f" ({reason})" if reason else ""))
+    elif flag_result.get("enabled", True):
+        lines.append("Quality flag: ok")
+    else:
+        lines.append("Quality flag: not scored" + (f" ({reason})" if reason else ""))
+    if class_mismatch and stage1_cell_type:
+        lines.append(f"Stage 1 predicts {cell_class_name(stage1_cell_type)}; "
+                     "check the cell class before accepting these labels.")
+    return lines
 
 
 class _AutoTypingConfigDialog(QDialog):
@@ -107,7 +162,7 @@ class _AutoTypingConfigDialog(QDialog):
 
 class ValidationAutoLabelPanel(QWidget):
     # Emit (BatchOptions, settings_dict). The dict carries
-    # ``{"model_dir": str|None}`` so the main window can pass it as
+    # ``{"model_dir": str|None, ...}`` so the main window can pass it as
     # ``config_overrides`` to the auto-label entry point.
     process_requested = Signal(object, object)
     guide_requested = Signal()
@@ -126,11 +181,15 @@ class ValidationAutoLabelPanel(QWidget):
         root.setSpacing(8)
         root.setAlignment(Qt.AlignTop)
 
+        try:
+            version = f" {labeler_info()['version']}"
+        except Exception:  # noqa: BLE001
+            version = ""
         desc = QLabel(
-            "Auto-label every node of the current SWC with the QC-label-flag "
-            "pipeline: input QC, cell-type detection or override, subtree "
-            "labeling, pyramidal apical/basal GNN rescue, topology cleanup, "
-            "and compact bad-label flag scoring."
+            f"Auto-label every node of the current SWC with the SWC auto-labeler{version}: "
+            "structural checks, the cell class (3-class or 2-class), subtree labeling, "
+            "topology rules with a correction of the branches near the soma, and a "
+            "quality flag that predicts how well the cell was labeled."
         )
         desc.setWordWrap(True)
         desc.setStyleSheet("font-size: 12px; color: #555;")
@@ -139,17 +198,17 @@ class ValidationAutoLabelPanel(QWidget):
         # ---- model dir picker (optional override)
         self._model_row = QHBoxLayout()
         self._model_row.setSpacing(6)
-        model_lbl = QLabel("Model dir (optional):")
+        model_lbl = QLabel("Model folder (optional):")
         model_lbl.setStyleSheet("font-size: 12px; color: #333;")
         self._model_row.addWidget(model_lbl)
         self._edit_model_dir = QLineEdit()
-        self._edit_model_dir.setPlaceholderText("Leave blank for default models")
-        self._edit_model_dir.setToolTip("Leave blank to use bundled / user-data models.")
+        self._edit_model_dir.setPlaceholderText("Leave blank for the shipped models")
+        self._edit_model_dir.setToolTip("A folder written by `swcstudio train auto-typing`.\n"
+                                        "Leave blank to use the shipped or updated models.")
         self._edit_model_dir.setFixedWidth(260)
         self._edit_model_dir.editingFinished.connect(self._refresh_backend_status)
         self._model_row.addWidget(self._edit_model_dir)
-        self._btn_browse_model = QPushButton("Browse…")
-        self._btn_browse_model.setText("Browse...")
+        self._btn_browse_model = QPushButton("Browse...")
         self._btn_browse_model.setFixedWidth(96)
         self._btn_browse_model.clicked.connect(self._on_browse_model_dir)
         self._model_row.addWidget(self._btn_browse_model)
@@ -161,47 +220,21 @@ class ValidationAutoLabelPanel(QWidget):
 
         option_row = QHBoxLayout()
         option_row.setSpacing(8)
-        cell_lbl = QLabel("Cell type:")
+        cell_lbl = QLabel("Cell class:")
         cell_lbl.setStyleSheet("font-size: 12px; color: #333;")
         option_row.addWidget(cell_lbl)
         self._cell_type_combo = QComboBox()
-        self._cell_type_combo.addItem("Unknown", "unknown")
-        self._cell_type_combo.addItem("Pyramidal", "pyramidal")
-        self._cell_type_combo.addItem("Interneuron", "interneuron")
+        add_cell_class_items(self._cell_type_combo)
+        try:
+            select_cell_class(self._cell_type_combo, get_auto_typing_config().get("cell_type"))
+        except Exception:  # noqa: BLE001
+            pass
         option_row.addWidget(self._cell_type_combo)
-        self._flag_enabled = QCheckBox("Flag")
+        self._flag_enabled = QCheckBox("Quality flag")
         self._flag_enabled.setChecked(True)
+        self._flag_enabled.setToolTip("Predict the cell's per-cell F1 and flag it for review\n"
+                                      "when that falls below the flag's cut-off.")
         option_row.addWidget(self._flag_enabled)
-        strict_lbl = QLabel("Strictness:")
-        strict_lbl.setStyleSheet("font-size: 12px; color: #333;")
-        option_row.addWidget(strict_lbl)
-        loose_lbl = QLabel("Loose")
-        loose_lbl.setStyleSheet("font-size: 11px; color: #666;")
-        option_row.addWidget(loose_lbl)
-        self._flag_slider = QSlider(Qt.Horizontal)
-        self._flag_slider.setRange(0, 100)
-        self._flag_slider.setValue(50)
-        self._flag_slider.setFixedWidth(120)
-        option_row.addWidget(self._flag_slider)
-        strict_side_lbl = QLabel("Strict")
-        strict_side_lbl.setStyleSheet("font-size: 11px; color: #666;")
-        option_row.addWidget(strict_side_lbl)
-        self._flag_strictness_spin = QDoubleSpinBox()
-        self._flag_strictness_spin.setRange(0.0, 1.0)
-        self._flag_strictness_spin.setSingleStep(0.01)
-        self._flag_strictness_spin.setDecimals(2)
-        self._flag_strictness_spin.setValue(0.50)
-        self._flag_strictness_spin.setFixedWidth(72)
-        self._flag_strictness_spin.setToolTip(
-            "Flag strictness from 0.00 loose to 1.00 strict."
-        )
-        option_row.addWidget(self._flag_strictness_spin)
-        self._flag_slider.valueChanged.connect(
-            lambda value: self._flag_strictness_spin.setValue(float(value) / 100.0)
-        )
-        self._flag_strictness_spin.valueChanged.connect(
-            lambda value: self._flag_slider.setValue(int(round(float(value) * 100.0)))
-        )
         option_row.addStretch()
         root.addLayout(option_row)
 
@@ -220,8 +253,7 @@ class ValidationAutoLabelPanel(QWidget):
         root.addLayout(top_btns)
 
         # Busy indicator: indeterminate progress bar (range 0-0) shown
-        # only while a worker is running. Single-file inference is short
-        # enough that a percentage-based bar isn't useful.
+        # only while a worker is running.
         self._progress = QProgressBar()
         self._progress.setRange(0, 0)
         self._progress.setVisible(False)
@@ -240,11 +272,6 @@ class ValidationAutoLabelPanel(QWidget):
         )
         root.addWidget(self._summary, stretch=1)
 
-    @staticmethod
-    def _display_feature_mode(raw: object) -> str:
-        _ = raw
-        return "Simple"
-
     def current_options(self) -> BatchOptions:
         return BatchOptions(
             soma=True,
@@ -253,38 +280,33 @@ class ValidationAutoLabelPanel(QWidget):
             basal=True,
             rad=False,
             zip_output=False,
-            cell_type=self._cell_type_combo.currentData() or "unknown",
+            cell_type=self._cell_type_combo.currentData() or "auto",
             flag_enabled=self._flag_enabled.isChecked(),
-            flag_strictness=float(self._flag_slider.value()) / 100.0,
-            flag_feature_mode="compact",
         )
 
     def current_settings(self) -> dict:
-        """Return ``{"model_dir": str|None}``."""
+        """Return ``{"model_dir": str|None, "cell_type": str, "flag_enabled": bool}``."""
         model_dir = (self._edit_model_dir.text() or "").strip() or None
         return {
             "model_dir": model_dir,
-            "cell_type": self._cell_type_combo.currentData() or "unknown",
+            "cell_type": self._cell_type_combo.currentData() or "auto",
             "flag_enabled": self._flag_enabled.isChecked(),
-            "flag_strictness": float(self._flag_slider.value()) / 100.0,
-            "flag_feature_mode": "compact",
         }
 
     def _on_browse_model_dir(self) -> None:
-        path = QFileDialog.getExistingDirectory(
-            self, "Select directory containing auto-typing model files"
-        )
+        path = QFileDialog.getExistingDirectory(self, "Select a labeler model folder")
         if path:
             self._edit_model_dir.setText(path)
             self._refresh_backend_status()
 
     def _refresh_backend_status(self) -> None:
         md = (self._edit_model_dir.text() or "").strip() or None
-        ok, reason = is_available(model_dir=md)
+        # A status probe, run while the panel is built: never download here.
+        ok, reason = is_available(model_dir=md, auto_download=False)
         if ok:
             self._backend_status_lbl.setText("ready")
             self._backend_status_lbl.setStyleSheet("font-size: 11px; color: #2a7;")
-            self._backend_status_lbl.setToolTip("All required model files are loaded.")
+            self._backend_status_lbl.setToolTip("The labeler's model folder was found.")
         else:
             self._backend_status_lbl.setText("unavailable — see details")
             self._backend_status_lbl.setStyleSheet("font-size: 11px; color: #c33;")
@@ -311,30 +333,24 @@ class ValidationAutoLabelPanel(QWidget):
 
         out_counts = dict(summary.get("out_type_counts", {}))
         flag_result = dict(summary.get("flag_result", {}) or {})
+        source = "chosen" if summary.get("cell_type_source") == "user" else "Stage 1"
         lines = [
             "Auto Label Editing Result",
             "-------------------------",
             f"Nodes processed: {summary.get('nodes_total', 0)}",
             f"Type changes: {summary.get('type_changes', 0)}",
             f"Radius changes: {summary.get('radius_changes', 0)}",
-            f"Cell type: {summary.get('cell_type') or 'unknown'} ({summary.get('cell_type_source') or 'stage1'})",
-            f"Flagged: {bool(flag_result.get('flagged', False))}",
+            f"Cell class: {cell_class_name(summary.get('cell_type'))} ({source})",
             (
                 "Output types (soma/axon/basal/apic): "
                 f"{out_counts.get(1, 0)}/{out_counts.get(2, 0)}/{out_counts.get(3, 0)}/{out_counts.get(4, 0)}"
             ),
         ]
-        if flag_result:
-            lines.append(
-                f"Flag score: {float(flag_result.get('rank_score', 0.0)):.4f} "
-                f"(prob_bad={float(flag_result.get('prob_bad', 0.0)):.4f})"
-            )
-            lines.append(
-                "Flag features: "
-                f"{self._display_feature_mode(flag_result.get('actual_feature_mode') or flag_result.get('selected_feature_mode'))}"
-            )
-            if flag_result.get("error"):
-                lines.append(f"Flag error: {flag_result.get('error')}")
+        lines.extend(flag_summary_lines(flag_result,
+                                        class_mismatch=bool(summary.get("class_mismatch")),
+                                        stage1_cell_type=summary.get("stage1_cell_type")))
+        for note in summary.get("notes") or []:
+            lines.append(f"Note: {note}")
         log_path = str(summary.get("log_path", "") or "").strip()
         if log_path:
             lines.extend(["", f"Log file: {log_path}"])
@@ -353,7 +369,5 @@ class ValidationAutoLabelPanel(QWidget):
         self._btn_browse_model.setEnabled(not running)
         self._cell_type_combo.setEnabled(not running)
         self._flag_enabled.setEnabled(not running)
-        self._flag_slider.setEnabled(not running)
-        self._flag_strictness_spin.setEnabled(not running)
         if running and status_text:
             self._summary.setPlainText(str(status_text))

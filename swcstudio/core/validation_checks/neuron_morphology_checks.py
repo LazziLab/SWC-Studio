@@ -7,7 +7,9 @@ from typing import Any, Callable
 
 import numpy as np
 
+from neurom.check import CheckResult as NeuroMCheckResult
 from neurom.check import morphology_checks as nm_checks
+from neurom.core.dataformat import COLS
 
 from swcstudio.core.validation_registry import register_check
 from swcstudio.core.validation_results import CheckResult
@@ -226,8 +228,53 @@ def _run_neurom_bool_check(
         )
 
 
+def has_no_narrow_start(morph, frac=0.9):
+    """NeuroM's ``has_no_narrow_start``, for neurites that branch at once.
+
+    A neurite fails when its first point's radius is below ``frac`` times
+    the radius of the point after it. NeuroM 4.0.5 reads that point as
+    ``root_node.points[1]``, which does not exist when the neurite's first
+    node is already a branch point (its root section holds one point), and
+    the whole check then errors. Here the point after it is the next point
+    on each child section instead, and the neurite fails if its first point
+    is narrow against any of them. A neurite of one node has nothing to
+    compare and passes. Bad entries match NeuroM's:
+    ``(root section id, the next point as a 1x4 array)``.
+    """
+    bad = []
+    for neurite in morph.neurites:
+        root = neurite.root_node
+        points = np.asarray(root.points)
+        if points.shape[0] == 0:
+            continue
+        first_radius = points[0][COLS.R]
+        if points.shape[0] >= 2:
+            next_points = [points[1]]
+        else:
+            next_points = []
+            for child in root.children:
+                child_points = np.asarray(child.points)
+                # MorphIO starts a child section with a copy of the branch
+                # point; the next real point follows it.
+                start = 1 if child_points.shape[0] and np.allclose(child_points[0][:3], points[0][:3]) else 0
+                if child_points.shape[0] > start:
+                    next_points.append(child_points[start])
+        for next_point in next_points:
+            if first_radius < frac * next_point[COLS.R]:
+                bad.append((root.id, np.asarray(next_point)[np.newaxis, :]))
+                break
+    return NeuroMCheckResult(len(bad) == 0, bad)
+
+
+# Checks evaluated here instead of by NeuroM, because NeuroM's version errors
+# on common real files.
+_LOCAL_CHECK_FUNCS: dict[str, Callable] = {
+    "has_no_narrow_start": has_no_narrow_start,
+}
+
+
 def _wrapper(key: str, label: str, nm_name: str):
-    func = getattr(nm_checks, nm_name)
+    func = _LOCAL_CHECK_FUNCS.get(nm_name) or getattr(nm_checks, nm_name)
 
     def _run(ctx, params: dict[str, Any]) -> CheckResult:
         return _run_neurom_bool_check(key=key, label=label, func=func, ctx=ctx, params=params)

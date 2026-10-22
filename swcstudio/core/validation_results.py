@@ -109,7 +109,7 @@ class ValidationReport:
     results: list[CheckResult] = field(default_factory=list)
 
     def summary(self) -> dict[str, int]:
-        out = {"pass": 0, "warning": 0, "fail": 0}
+        out = {"pass": 0, "info": 0, "warning": 0, "fail": 0}
         for r in self.results:
             if r.status in out:
                 out[r.status] += 1

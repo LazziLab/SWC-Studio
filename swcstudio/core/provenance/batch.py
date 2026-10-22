@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from swcstudio.core.provenance.ops import OpKind
 from swcstudio.core.provenance.tracked_op import tracked_op
+from swcstudio.core.swc_io import is_swc_data_file
 
 BatchTransform = Callable[[Path, str], dict[str, Any]]
 BatchParams = Callable[[Path, dict[str, Any]], dict[str, Any]]
@@ -50,7 +51,7 @@ def run_tracked_batch(
         [
             path
             for path in folder_path.iterdir()
-            if path.is_file() and path.suffix.lower() == ".swc"
+            if is_swc_data_file(path)
         ],
         key=lambda path: path.name.lower(),
     )
@@ -59,6 +60,8 @@ def run_tracked_batch(
 
     processed = 0
     failures: list[str] = []
+    # (file name, error) pairs, so callers need not split the strings above.
+    failed_files: list[tuple[str, str]] = []
     per_file: list[Any] = []
     commits: list[dict[str, Any]] = []
     total = len(swc_files)
@@ -94,7 +97,11 @@ def run_tracked_batch(
             if summary_for is not None:
                 per_file.append(summary_for(swc_path, result))
         except Exception as exc:  # noqa: BLE001
-            failures.append(f"{swc_path.name}: {exc}")
+            error = str(exc)
+            prefix = f"{swc_path.name}: "
+            error = error[len(prefix):] if error.startswith(prefix) else error
+            failures.append(prefix + error)
+            failed_files.append((swc_path.name, error))
 
     return {
         "folder": str(folder_path),
@@ -104,6 +111,7 @@ def run_tracked_batch(
         "files_failed": len(failures),
         "per_file": per_file,
         "failures": failures,
+        "failed_files": failed_files,
         "commits": commits,
         "log_path": None,
     }

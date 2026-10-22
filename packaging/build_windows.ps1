@@ -1,7 +1,3 @@
-param(
-    [switch]$AllowCudaTorchBundle
-)
-
 $ErrorActionPreference = "Stop"
 
 $RootDir = Split-Path -Parent $PSScriptRoot
@@ -28,30 +24,15 @@ if ($PythonExe -eq "py") {
     & $PythonExe "$RootDir\packaging\make_windows_icon.py"
 }
 
-Write-Host "Checking PyTorch build flavor..."
-if ($PythonExe -eq "py") {
-    $TorchCuda = & py -3 -c "import torch; print(torch.version.cuda or '')" 2>$null
-} else {
-    $TorchCuda = & $PythonExe -c "import torch; print(torch.version.cuda or '')" 2>$null
-}
-if ($LASTEXITCODE -ne 0) {
-    throw "PyTorch import failed in the build environment. Install SWC-Studio dependencies before packaging."
-}
-$TorchCudaText = ($TorchCuda -join "").Trim()
-if ((-not $AllowCudaTorchBundle) -and $TorchCudaText.Length -gt 0) {
-    throw (
-        "This environment has a CUDA PyTorch build (CUDA $TorchCudaText). " +
-        "The release executable should be built from a CPU-only PyTorch environment " +
-        "to keep the one-click download portable and small. Rebuild in a CPU environment, " +
-        "or pass -AllowCudaTorchBundle to intentionally create a large GPU bundle."
-    )
-}
-
 Write-Host "Building Windows executable with PyInstaller..."
 if ($PythonExe -eq "py") {
     & py -3 -m PyInstaller --noconfirm --clean $SpecPath
 } else {
     & $PythonExe -m PyInstaller --noconfirm --clean $SpecPath
+}
+# A failed build would otherwise go on to stage and zip an older dist\ folder.
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller failed with exit code $LASTEXITCODE"
 }
 
 if (Test-Path $ZipPath) {

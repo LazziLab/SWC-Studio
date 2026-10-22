@@ -12,11 +12,11 @@ The app ships in two flavors:
   Module          What it contains                                   Re-download
   ============== ================================================== ============
   Runtime        Python interpreter + heavy libraries                full .app
-                 (PyTorch, Qt, vispy, sklearn). Rare bumps.
+                 (Qt, vispy, sklearn, XGBoost). Rare bumps.
   Application    Your Python code (``swcstudio/`` package).          5 MB zip
                  Changes most often.
-  Models         Trained sklearn pickles, torch checkpoints, QC      ~75-80 MB
-                 gate, and compact flag models.
+  Models         The auto-labeler's model folder                    ~50 MB
+                 (``labeler-<version>/``).
   ============== ================================================== ============
 
 The bundled desktop app contains its own internal copy of each piece. When the
@@ -35,9 +35,9 @@ Update flow
 4. The relevant zip is downloaded into a temp file, verified by SHA-256,
    extracted into the user override location atomically.
 5. The user is told to relaunch for code updates. Model updates are
-   available to subsequent auto-label runs; the large Stage 1/Stage 2
-   caches include resolved-path metadata, while a relaunch guarantees
-   that all already-initialized neural-model state is refreshed.
+   available to subsequent auto-label runs, because loaded models are
+   cached by file path and modification time; a relaunch guarantees that
+   every loaded model is refreshed.
 
 Public API
 ----------
@@ -184,14 +184,18 @@ class UpdateManifest:
 def current_app_version() -> str:
     """Return the currently-loaded swcstudio code version.
 
-    Priority: VERSION file inside override dir > BUNDLED_APP_VERSION.
+    Priority: VERSION file inside override dir > BUNDLED_APP_VERSION. An
+    override older than the bundled code is not loaded (the bootstrap
+    skips it), so it is not reported either.
     """
     override_version = user_app_override_dir() / "VERSION"
     if app_updates_supported() and override_version.is_file():
         try:
-            return override_version.read_text(encoding="utf-8").strip()
+            version = override_version.read_text(encoding="utf-8").strip()
         except OSError:
-            pass
+            version = ""
+        if version and not _is_newer(BUNDLED_APP_VERSION, version):
+            return version
     return BUNDLED_APP_VERSION
 
 

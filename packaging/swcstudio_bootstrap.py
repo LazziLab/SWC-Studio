@@ -9,7 +9,7 @@ is to:
    downloaded override dir over the bundled-with-the-app copy.
 2. Add that directory to ``sys.path``.
 3. Call multiprocessing.freeze_support() — the standard PyInstaller fix
-   that prevents joblib / torch worker spawns from re-launching the GUI.
+   that prevents joblib worker spawns from re-launching the GUI.
 4. Import and run ``swcstudio.gui.main.main``.
 
 Why this matters
@@ -37,13 +37,14 @@ PyInstaller's static analyzer follows ``import`` statements at the top
 of the entrypoint. Because we use ``__import__("swcstudio.gui.main", …)``
 (a runtime string-based import), PyInstaller does **not** bundle the
 swcstudio package — exactly what we want. To make it still bundle the
-heavy library dependencies (numpy, torch, PySide6, vispy, etc.), the
+heavy library dependencies (numpy, XGBoost, PySide6, vispy, etc.), the
 modular spec lists those explicitly under ``hiddenimports``.
 """
 from __future__ import annotations
 
 import multiprocessing
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -131,19 +132,63 @@ def _source_repo_dir() -> Optional[Path]:
     return None
 
 
+def _version_key(text: Optional[str]) -> Optional[tuple[int, int, int]]:
+    match = re.match(r"\s*v?(\d+)(?:\.(\d+))?(?:\.(\d+))?", text or "")
+    if match is None:
+        return None
+    major, minor, patch = (int(part or 0) for part in match.groups())
+    return (major, minor, patch)
+
+
+def _code_version(app_dir: Path) -> Optional[tuple[int, int, int]]:
+    """Version of the ``swcstudio`` code under ``app_dir``.
+
+    The updater writes a ``VERSION`` file beside each code layer it
+    installs; the release stamps ``BUNDLED_APP_VERSION`` into the code's
+    ``core/updater.py`` (scripts/stamp_version.py).
+    """
+    try:
+        return _version_key((app_dir / "VERSION").read_text(encoding="utf-8"))
+    except OSError:
+        pass
+    try:
+        updater = (app_dir / "swcstudio" / "core" / "updater.py").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r'^BUNDLED_APP_VERSION\s*=\s*"([^"]+)"', updater, re.MULTILINE)
+    return _version_key(match.group(1)) if match else None
+
+
+def _override_is_current(override: Path, bundled: Optional[Path]) -> bool:
+    """Whether the downloaded code layer is at least as new as the bundle.
+
+    A code layer from an earlier version survives installing a newer app,
+    and loading it would quietly run the old code. With no bundle to
+    compare against (running from source) the override is used as before.
+    """
+    if bundled is None:
+        return True
+    bundled_version = _code_version(bundled)
+    if bundled_version is None:
+        return True
+    override_version = _code_version(override)
+    return override_version is not None and override_version >= bundled_version
+
+
 def _find_app_dir() -> Optional[Path]:
     """Return the directory that *contains* ``swcstudio/`` (i.e. its parent).
 
     Search order:
-        1. User override (auto-updater target)
+        1. User override (auto-updater target), unless it is older than
+           the bundled code
         2. Bundled in the .app
         3. Source repo (dev mode)
     """
     override = _user_app_override_dir()
-    if (override / "swcstudio" / "__init__.py").exists():
+    bundled = _bundled_app_dir()
+    if (override / "swcstudio" / "__init__.py").exists() and _override_is_current(override, bundled):
         return override
 
-    bundled = _bundled_app_dir()
     if bundled is not None:
         return bundled
 
@@ -182,7 +227,7 @@ def main() -> int:
 
     # Lazy / runtime import — PyInstaller's static analyzer cannot follow
     # ``__import__`` with a string argument, so swcstudio is *not* baked into
-    # the PyInstaller bundle. The heavy deps (numpy, torch, PySide6, …) are
+    # the PyInstaller bundle. The heavy deps (numpy, XGBoost, PySide6, …) are
     # still bundled because the modular spec lists them as hiddenimports.
     main_mod = __import__("swcstudio.gui.main", fromlist=["main"])
     main_mod.main()

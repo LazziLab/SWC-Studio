@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from PyInstaller.utils.hooks import (
     collect_data_files,
     collect_dynamic_libs,
@@ -26,21 +28,28 @@ def bundle_inputs() -> tuple[list, list, list[str]]:
     SWC-Studio source and model layers are staged after PyInstaller runs.
     """
     datas: list = []
+    # SWC-Studio's license and the notices for everything the app bundles.
+    root = Path(__file__).resolve().parents[1]
+    datas += [(str(root / "LICENSE"), "."), (str(root / "THIRD_PARTY_NOTICES.md"), ".")]
     datas += collect_data_files("vispy")
-    datas += collect_data_files("torch_geometric", include_py_files=True)
-    datas += collect_data_files("torch", include_py_files=True)
     datas += collect_data_files("xgboost", includes=["VERSION"])
+    # Each bundled package's metadata, which carries its license text.
     for distribution in (
         "neurom",
         "morphio",
         "swcstudio",
         "vispy",
         "scikit-learn",
-        "torch",
-        "torch_geometric",
         "xgboost",
         "zstandard",
         "pyzipper",
+        "numpy",
+        "scipy",
+        "pandas",
+        "joblib",
+        "pyqtgraph",
+        "PySide6",
+        "shiboken6",
     ):
         datas += copy_metadata(distribution)
 
@@ -52,7 +61,6 @@ def bundle_inputs() -> tuple[list, list, list[str]]:
         + collect_submodules("sklearn", filter=_exclude_test_modules)
         + collect_submodules("scipy", filter=_exclude_test_modules)
         + collect_submodules("xgboost", filter=_exclude_xgboost_tests)
-        + collect_submodules("torch_geometric", filter=_exclude_test_modules)
         + [
             "PySide6",
             "PySide6.QtCore",
@@ -65,8 +73,8 @@ def bundle_inputs() -> tuple[list, list, list[str]]:
             "vispy",
             "vispy.app.backends._qt",
             "vispy.app.backends._pyside6",
-            "torch",
             "xgboost",
+            "joblib",
             "numpy",
             "pandas",
             "scipy",
@@ -82,13 +90,14 @@ def bundle_inputs() -> tuple[list, list, list[str]]:
     return datas, binaries, hiddenimports
 
 
-MODULE_COLLECTION_MODE = {
-    "torch_geometric": "pyz+py",
-    "torch": "pyz+py",
-}
+MODULE_COLLECTION_MODE: dict[str, str] = {}
 
 EXCLUDES = [
     "swcstudio",
+    # Auto-labeling needs no deep-learning framework; keep one installed in the
+    # build environment out of the bundle.
+    "torch",
+    "torch_geometric",
     "xgboost.testing",
     "hypothesis",
     "pytest",

@@ -7,6 +7,7 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from swcstudio.cli import cli
@@ -60,9 +61,14 @@ def _fake_auto_label_file(file_path: str, **_kwargs) -> dict:
         "cell_type_source": "user",
         "stage1_confidence": None,
         "qc_result": {"passed": True, "reasons": []},
-        "flag_result": {"flagged": False, "rank_score": 0.1},
+        "flag_result": {"flagged": False, "predicted_f1": 0.9, "suspicion": 0.1},
         "change_details": [],
-        "result_obj": object(),
+        "result_obj": SimpleNamespace(
+            cell_type="pyramidal", cell_type_source="user", stage1_cell_type="pyramidal",
+            stage1_confidence=0.9, class_mismatch=False, notes=[],
+            flag_result={"flagged": False, "predicted_f1": 0.9, "suspicion": 0.1,
+                         "flagged_by_threshold": False, "threshold": 0.2},
+        ),
     }
 
 
@@ -120,8 +126,8 @@ class CLIAutoLabelHistoryTests(unittest.TestCase):
             self.assertEqual(rc, 0, show_stdout)
             self.assertIn("Operation", show_stdout)
             self.assertIn("Action: Auto Label", show_stdout)
-            self.assertIn("Cell Type: pyramidal", show_stdout)
-            self.assertIn("Flag Strictness: 0.5", show_stdout)
+            self.assertIn("Cell Class: pyramidal", show_stdout)
+            self.assertIn("Flagging Enabled: Yes", show_stdout)
             self.assertNotIn("model_dir", show_stdout)
             self.assertNotIn("nodes_total", show_stdout)
             self.assertNotIn("target_sha", show_stdout)
@@ -146,8 +152,9 @@ class CLIAutoLabelHistoryTests(unittest.TestCase):
             good.write_text(SWC_PLUS, encoding="utf-8")
             bad.write_text(SWC_PLUS, encoding="utf-8")
 
+            # The CLI runs the GUI's batch, which labels through this function.
             with patch("swcstudio.core.auto_typing.is_available", return_value=(True, "ok")), patch(
-                "swcstudio.cli.cli.validation_auto_label_file",
+                "swcstudio.tools.validation.features.auto_typing.auto_label_file",
                 side_effect=_fake_auto_label_file,
             ):
                 rc, stdout = self._run_cli(
@@ -165,15 +172,29 @@ class CLIAutoLabelHistoryTests(unittest.TestCase):
             self.assertEqual(payload["files_failed"], 1)
             self.assertEqual(payload["files_qc_failed"], 1)
             self.assertIsNone(payload["out_dir"])
-            self.assertIsNone(payload["log_path"])
             self.assertEqual(len(payload["commits"]), 1)
+            # The file name is said once, not twice.
+            self.assertEqual(payload["failures"], ["bad.swc: QC rejected; bad test input"])
+            self.assertEqual(payload["commits"][0]["output_path"], str(good))
+            self.assertEqual(set(payload["model_record"]),
+                             {"model_dir", "model_source", "model_version", "model_sha", "model_files"})
 
             self.assertTrue(archive_path_for(good).exists())
             self.assertFalse(archive_path_for(bad).exists())
             self.assertIn("2 4 1 0 0 0.5 1", good.read_text(encoding="utf-8"))
             self.assertNotIn("# @PROV", bad.read_text(encoding="utf-8"))
             self.assertFalse((folder / f"{folder.name}_batch_auto_typing").exists())
-            self.assertFalse(list(folder.glob("*batch_auto_typing*")))
+            # Like the GUI batch, one text report inside the folder.
+            report = Path(payload["log_path"])
+            self.assertEqual(report.parent, folder)
+            self.assertEqual([p.name for p in folder.glob("*batch_auto_typing*")], [report.name])
+            report_text = report.read_text(encoding="utf-8")
+            self.assertIn("1 failed the structural checks", report_text)
+            self.assertIn("bad.swc: QC rejected; bad test input", report_text)
+            review = Path(payload["flag_review_path"])
+            self.assertTrue(review.is_file())
+            records = json.loads(review.read_text(encoding="utf-8"))["records"]
+            self.assertEqual({r["file"]: r["labeled"] for r in records}, {"good.swc": True, "bad.swc": False})
 
     def test_gui_batch_backend_uses_independent_file_histories(self) -> None:
         with tempfile.TemporaryDirectory(prefix="swcstudio-gui-batch-autolabel-") as tmp:
@@ -197,7 +218,12 @@ class CLIAutoLabelHistoryTests(unittest.TestCase):
                 )
 
             self.assertIsNone(result1.out_dir)
-            self.assertIsNone(result1.log_path)
+            # Every batch writes one report beside the files it edited in place.
+            report = Path(result1.log_path)
+            self.assertEqual(report.parent, folder)
+            report_text = report.read_text(encoding="utf-8")
+            self.assertIn("first.swc", report_text)
+            self.assertIn("second.swc", report_text)
             self.assertEqual(
                 {row["file"]: row["operation_id"] for row in result1.commits},
                 {"first.swc": "op-1", "second.swc": "op-1"},

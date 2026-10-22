@@ -15,9 +15,11 @@ runtime-root/
     swcstudio/
   models/
     VERSION
-    *.pkl
-    *.pt
-    *.joblib
+    labeler-<version>/
+      cell_type_classifier.pkl
+      branch_classifier.pkl
+      branch_correction.joblib
+      flag_model.joblib
 ```
 
 `runtime-root` is:
@@ -55,10 +57,9 @@ py -3.12 -m venv .venv-packaging-windows
 .\packaging\build_windows.ps1
 ```
 
-The public Windows build must use CPU-only PyTorch. The build script
-fails if it detects CUDA unless `-AllowCudaTorchBundle` is passed
-explicitly. It prefers `.venv-packaging-windows` and falls back to the
-project `.venv` for local development builds.
+The build script prefers `.venv-packaging-windows` and falls back to the
+project `.venv` for local development builds. The bundle needs no GPU
+libraries: auto-labeling runs on the CPU.
 
 Generated `build/`, `dist/`, app bundles, and release zips are ignored
 and must not be committed.

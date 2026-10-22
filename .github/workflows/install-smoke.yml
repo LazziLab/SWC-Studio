@@ -206,3 +206,16 @@ jobs:
             PY="$GITHUB_WORKSPACE/.source/bin/python"
           fi
           "$PY" -m swcstudio.cli.cli doctor --json
+
+      - name: Run the test suite against the source install
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            PY="$GITHUB_WORKSPACE/.source/Scripts/python.exe"
+          else
+            PY="$GITHUB_WORKSPACE/.source/bin/python"
+          fi
+          "$PY" -m pip install "pytest>=8.3,<10"
+          "$PY" -m pytest -q

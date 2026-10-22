@@ -1,0 +1,52 @@
+cff-version: 1.2.0
+message: "If you use SWC-Studio in your work, please cite it as below."
+title: "SWC-Studio"
+abstract: >-
+  A desktop application, command-line interface and Python package for
+  quality control of neuron morphology reconstructions in SWC format. It
+  validates files against structural, geometric and annotation checks,
+  repairs the issues it finds, labels soma, axon, basal and apical
+  dendrite from geometry with the SWC auto-labeler, and records every edit
+  in a per-file provenance history.
+type: software
+license: MIT
+authors:
+  - given-names: Xinran
+    family-names: Shi
+    email: shixinra@usc.edu
+    orcid: "https://orcid.org/0009-0007-0640-8700"
+    affiliation: "Institute for Technology and Medical Systems (ITEMS), and Ming Hsieh Department of Electrical and Computer Engineering, University of Southern California"
+  - given-names: Jean-Marie C.
+    family-names: Bouteiller
+    affiliation: "Institute for Technology and Medical Systems (ITEMS), and Alfred E. Mann Department of Biomedical Engineering, University of Southern California"
+  - given-names: Michael
+    family-names: Bienkowski
+    affiliation: "Department of Physiology and Neuroscience, Keck School of Medicine, University of Southern California"
+  - given-names: Gianluca
+    family-names: Lazzi
+    affiliation: "Institute for Technology and Medical Systems (ITEMS), University of Southern California"
+repository-code: "https://github.com/LazziLab/SWC-Studio"
+url: "https://lazzilab.github.io/SWC-Studio/"
+keywords:
+  - neuroinformatics
+  - neuronal morphology
+  - SWC
+  - quality control
+  - compartment labeling
+  - provenance
+version: "0.2.1"
+date-released: "2026-06-19"
+references:
+  - type: software
+    title: "Autolabeler: automatic axon, basal and apical labeling of SWC neuron reconstructions"
+    authors:
+      - given-names: Xinran
+        family-names: Shi
+      - given-names: Jean-Marie C.
+        family-names: Bouteiller
+      - given-names: Michael
+        family-names: Bienkowski
+      - given-names: Gianluca
+        family-names: Lazzi
+    repository-code: "https://github.com/LazziLab/swc-autolabeler"
+    version: 1.0.1
