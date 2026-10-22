@@ -34,8 +34,8 @@ keywords:
   - quality control
   - compartment labeling
   - provenance
-version: "0.2.1"
-date-released: "2026-06-19"
+version: "0.3.0"
+date-released: "2026-10-22"
 references:
   - type: software
     title: "Autolabeler: automatic axon, basal and apical labeling of SWC neuron reconstructions"
