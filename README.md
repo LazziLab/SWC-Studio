@@ -258,6 +258,10 @@ environment fingerprint for reproducibility. CLI: `swcstudio history
 4. Rerun validation.
 5. Save or export the cleaned result.
 
+## Citing
+
+If you use SWC-Studio in your work, please cite it as **SWC-Studio, [RRID:SCR_028284](https://scicrunch.org/resolver/RRID:SCR_028284)**. GitHub's "Cite this repository" button gives the full citation from `CITATION.cff`.
+
 ## License
 
 Released under the MIT License. See `LICENSE`.
